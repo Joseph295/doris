@@ -57,7 +57,7 @@ FE 的核心代码集中在 `fe/fe-core/src/main/java/org/apache/doris/` 下，�
 
 - **`qe/`** —— Query Engine 层，MySQL 协议接入后的会话与执行调度：`ConnectContext`（一次连接的上下文）、`StmtExecutor`（语句执行总入口）、`Coordinator`（Fragment 调度）。查询主线的起点，深挖见 part2 查询的一生。
 - **`nereids/`** —— **当前的优化器**，从 SQL 文本到物理计划的全过程：`parser/`（语法解析）、`rules/`（RBO 规则）、`cost/`+`stats/`（CBO 代价与统计）、`trees/`（Plan/Expression 树）。part2 的 Nereids 上/下两章的主战场。
-- **`analysis/`** —— 见下文 tricky 点，**旧优化器的 AST 与合法化层遗留**，但其中的描述符结构（`DescriptorTable`、`TupleDescriptor`）仍被现役代码复用。
+- **`analysis/`** —— 一个**名字会骗人的目录**（见下文 tricky 点）：它曾是旧优化器 AST 的家，但那套 AST 在本 master 已被删除；如今留下的是描述符结构（`DescriptorTable`、`TupleDescriptor`）与 DDL 描述符辅助类（`KeysDesc`、`PartitionDesc`、`ColumnDef` 等），被 Nereids 与 catalog 现役复用。
 - **`planner/`** —— 物理计划节点（`PlanNode` 体系，如 `HashJoinNode`、`OlapScanNode`）与 `DataSink`。Nereids 优化完成后，物理算子仍复用这一层的节点类下发给 BE，part2 计划分发章会讲。
 - **`catalog/`** —— 元数据的内存对象模型：`Env`、`Database`、`OlapTable`、`Partition`、`Tablet`、`Replica`（第 3 章那套层级的 Java 落地）。part4 元数据与 FE 内核的核心。
 - **`persist/`**、**`journal/`** —— 元数据持久化：`journal/` 是 EditLog 抽象（bdbje 实现），`persist/` 是各类操作日志的序列化体。part4 元数据持久化章深挖。
@@ -69,18 +69,22 @@ FE 的核心代码集中在 `fe/fe-core/src/main/java/org/apache/doris/` 下，�
 - **`mysql/`** —— MySQL 网络协议层的编解码。part2 连接与协议章。
 - **`cloud/`** —— 存算分离的 FE 侧全部专属类（`CloudEnv`、`CloudGlobalTransactionMgr` 等，第 4 章 4.4 数过约 50 个类）。读到这个包，默认它只在 cloud mode 生效。
 
-### tricky 点：analysis/ 与 nereids/ 为什么并存，读代码时怎么不误入废弃路径
+### tricky 点：analysis/ 是个"名字活下来、角色已死"的目录
 
-打开 `fe/fe-core/src/main/java/org/apache/doris/analysis/` 会看到 74 个文件，里面既有 `SelectStmt` 这类看着像"查询主流程"的类，又有 `AggregateInfo`、`AnalyticWindow` 这类优化相关的结构。新手很容易顺着 `analysis/` 往下读，以为这就是 SQL 的解析入口——**这是最大的一个误区**。
+`analysis/` 这个名字极具误导性——顾名思义它该是"SQL 语义分析"的所在，新手很容易顺着它往下读，以为这就是查询的解析入口。**这个直觉在本 master 上是错的**，而且错得很彻底：`fe/fe-core/src/main/java/org/apache/doris/analysis/` 下有约 74 个文件，但你 `ls` 一遍会发现**一个 `*Stmt.java` 都没有**——`SelectStmt`、`InsertStmt` 这类旧 AST 节点在当前代码里根本不存在。
 
-历史原因是：Doris 早期只有一套优化器（业界常称"旧优化器 / Legacy Planner"），它的链路是 `analysis/` 里的 SQL 解析 + 语义合法化（`Analyzer` 对 `SelectStmt` 做 analyze）→ `planner/` 里的 `OriginalPlanner` 生成计划。后来 Nereids 作为全新的 CBO 优化器**另起炉灶**，走 `nereids/parser/` → `nereids/rules/` → `nereids/` 自己的 Plan 树，最后再翻译成 `planner/` 的物理节点下发。两套优化器在一段时期内共存，由会话变量 `enable_nereids_planner`（`fe/fe-core/src/main/java/org/apache/doris/qe/SessionVariable.java`）切换。而如今 **Nereids 早已是默认且唯一被推荐的路径**，旧优化器的 `SelectStmt`/`Analyzer` 主流程处于废弃状态。
+要理解这个反直觉的现状，得看它的历史。Doris 早期只有一套优化器（业界常称"旧优化器 / Legacy Planner"），它的链路正是从 `analysis/` 里的一套 SQL AST（`SelectStmt` 等）+ 语义合法化开始，再到 `planner/` 生成计划。后来 Nereids 作为全新的 CBO 优化器**另起炉灶**——`nereids/parser/`（语法解析）→ `nereids/rules/`（规则重写）→ `nereids/` 自己的 Plan 树 → `nereids/glue/translator/` 翻译成物理节点下发。两套优化器共存过一段时间，由会话变量 `enable_nereids_planner`（`fe/fe-core/src/main/java/org/apache/doris/qe/SessionVariable.java`）切换；如今 Nereids 早已是默认且唯一路径，**旧优化器连同它那套 `analysis/` 里的 Stmt AST 已被整体删除**。今天真正做查询语义分析的，是 `fe/fe-core/src/main/java/org/apache/doris/nereids/jobs/executor/Analyzer.java`（`public class Analyzer extends AbstractBatchJobExecutor`）——注意它在 `nereids/` 下，和 `analysis/` 毫无关系，只是恰好也叫 Analyzer。
 
-所以 `analysis/` 今天的真实身份是"半退役目录"：
+那 `analysis/` 今天到底装了什么？删掉 AST 后，剩下的都是**没有被 Nereids 重写、仍被现役代码复用的数据结构**，分三类：
 
-- **已废弃、别读**：`SelectStmt`、`Analyzer` 及围绕它们的旧解析/合法化主流程——追查询逻辑时读到这些，说明你走错了路，应该回到 `nereids/`。
-- **仍现役、要读**：`DescriptorTable`、`TupleDescriptor`、`SlotDescriptor` 这类**描述符结构**，以及部分 DDL/工具类（`ColumnDef`、`CreateTableStmt` 等建表相关）。Nereids 生成物理计划、翻译成 Thrift 下发给 BE 时，仍复用 `analysis/` 里的这些描述符——它们是新旧共用的"数据结构基座"，没有被 Nereids 重写。
+- **计划翻译用的描述符结构**：`DescriptorTable`、`TupleDescriptor`（`fe/fe-core/src/main/java/org/apache/doris/analysis/DescriptorTable.java`、`fe/fe-core/src/main/java/org/apache/doris/analysis/TupleDescriptor.java`）。Nereids 把物理计划翻译成 Thrift 下发 BE 时直接复用它们——引用方在 `fe/fe-core/src/main/java/org/apache/doris/nereids/glue/translator/PhysicalPlanTranslator.java` 与同目录的 `fe/fe-core/src/main/java/org/apache/doris/nereids/glue/translator/PlanTranslatorContext.java`。这是 `analysis/` 和 `nereids/` 之间唯一实质的连接点。
+- **DDL 描述符辅助类**：`KeysDesc`、`PartitionDesc`、`PartitionKeyDesc`、`DistributionDesc`、`ColumnDef` 等 `*Desc` 建表结构。它们不参与查询，服务于 DDL——`fe/fe-core/src/main/java/org/apache/doris/datasource/InternalCatalog.java` 与 Nereids 的建表命令 `fe/fe-core/src/main/java/org/apache/doris/nereids/trees/plans/commands/info/CreateTableInfo.java` 都在用。
+- **聚合/排序等计划辅助结构与基类残骸**：`AggregateInfo`、`SortInfo`、`AnalyticWindow` 等，以及 `StatementBase`、`StmtType`、`ParseNode` 这类接口/枚举层面的遗留（它们不是完整 AST，只是没被清理干净的基座）。
 
-**误入废弃路径的后果**：假设你想搞清"一个谓词是怎么被下推的"，如果从 `analysis/` 的 `SelectStmt.analyze()` 入手，读到的是一套几乎不再执行的逻辑，结论对不上线上行为，白费半天。正确的判别法很简单——**追查询/优化逻辑一律从 `nereids/` 进，只有当 Nereids 代码引用到某个 `DescriptorTable`/`TupleDescriptor` 时，才顺着链接跳进 `analysis/` 看那个具体的描述符结构**，而不是反过来把 `analysis/` 当入口通读。
+**这带来的教训比"两套优化器并存"更普适**：目录名是历史的化石，可能在其原始角色消亡后仍然存在。所以判别法有两条——
+
+1. **别按名字猜职责**：追查询/优化逻辑一律从 `nereids/` 进（入口是上面那个 Nereids 侧的 `Analyzer`，全路径 `fe/fe-core/src/main/java/org/apache/doris/nereids/jobs/executor/Analyzer.java`），只有当 Nereids 或 DDL 代码引用到 `analysis/` 里的某个具体描述符时，才顺着链接跳进去看那一个类，绝不把 `analysis/` 当查询入口通读。
+2. **引用类名前先 `ls`/`grep` 核实**：网上大量旧博客还在讲 `SelectStmt`、`OriginalPlanner` 这套已删除的类，照搬会得出对不上代码的结论。这也是本教程的铁律——**任何一个类名、路径，落笔前都在当前 checkout 里确认存在**，而不是凭记忆或旧资料写。
 
 ## 5.3 BE 源码地图
 
