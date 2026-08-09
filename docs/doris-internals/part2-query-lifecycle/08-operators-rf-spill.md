@@ -49,15 +49,27 @@ build 侧 `HashJoinBuildSinkLocalState`（`be/src/exec/operator/hashjoin_build_s
 
 **tricky 点：outer/anti/null-aware 语义在两态拆分下落在哪。** 内连接很简单——probe 到一行、匹配上就输出。但下面几种语义要求"probe 扫完之后还得再做一轮"，正是两态拆分容易漏的地方：
 
-- **RIGHT/FULL OUTER JOIN 的右表未匹配行**：右表里从没被任何左行命中的行也要输出（补 NULL）。这没法在 probe 逐行时判定——必须等**整个** probe 阶段结束、才知道哪些 build 行"从未被访问"。所以哈希表里每个 build 行带一个 visited 标记，probe 结束后再遍历一遍哈希表把未访问行吐出来。判定分支在 `be/src/exec/operator/hashjoin_probe_operator.cpp:454`（`RIGHT_OUTER_JOIN || FULL_OUTER_JOIN`）。**错写会怎样**：如果在 probe 每个 block 结束就"收尾"、而不是等 source 真正 eos，右表未匹配行会漏输出——结果少行，且因为依赖数据分布，小数据量测不出来。
-- **build 侧为空的短路**：build 表 0 行时，LEFT_OUTER/FULL_OUTER/LEFT_ANTI 的结果就是"probe 表 + 右侧全 NULL"，代码在 `be/src/exec/operator/hashjoin_probe_operator.cpp:199` 的 `empty_right_table_shortcut()` 直接短路输出。**错写会怎样**：漏了这个短路、按普通 probe 走，build 侧哈希表为空会让所有左行探空——LEFT ANTI 恰好全部输出、LEFT OUTER 补 NULL 输出，逻辑上碰巧能对；但真正的坑是反过来——把该短路的 join 类型判错，就会多输出或少输出。
+- **RIGHT/FULL OUTER（及 RIGHT SEMI/ANTI）的右表未匹配行**：右表里从没被任何左行命中的行也要处理（OUTER 补 NULL 输出、ANTI 输出、SEMI 丢弃）。这没法在 probe 逐行时判定——必须等**整个** probe 阶段结束、才知道哪些 build 行"从未被访问"。所以哈希表里每个 build 行带一个 visited 标记，probe eos 后再遍历一遍哈希表把未访问行按 join 类型处理。这一步落在 probe 的 `_probe_eos` 分支：`if (_is_right_semi_anti || (_is_outer_join && _join_op != TJoinOp::LEFT_OUTER_JOIN))` 时调 `finish_probing()` 遍历哈希表（`be/src/exec/operator/hashjoin_probe_operator.cpp:278`~`:285`）。**错写会怎样**：如果在 probe 每个 block 结束就"收尾"、而不是等 `_probe_eos` 才 `finish_probing`，右表未匹配行会漏处理——结果少行，且因为依赖数据分布，小数据量测不出来。
+- **build 侧为空的短路**：build 表 0 行时，LEFT_OUTER/FULL_OUTER/LEFT_ANTI 的结果就是"probe 表 + 右侧全 NULL"，代码在 `be/src/exec/operator/hashjoin_probe_operator.cpp:198` 的 `empty_right_table_shortcut()` 直接短路输出。**错写会怎样**：漏了这个短路、按普通 probe 走，build 侧哈希表为空会让所有左行探空——LEFT ANTI 恰好全部输出、LEFT OUTER 补 NULL 输出，逻辑上碰巧能对；但真正的坑是反过来——把该短路的 join 类型判错，就会多输出或少输出。
 - **NULL_AWARE_LEFT_ANTI/SEMI JOIN**：这是 `NOT IN (subquery)` 的落地，NULL 具有"传染性"（build 侧只要有一个 NULL，左侧任何行都不能确定不在集合里）。probe 算子为它保留了独立的 `TJoinOp::NULL_AWARE_LEFT_ANTI_JOIN` 分支（`be/src/exec/operator/hashjoin_probe_operator.h:40`、`:137`）。**错写会怎样**：当成普通 ANTI JOIN 处理、忽略 NULL 传染，`NOT IN` 结果直接错——这是 SQL 语义级的错，不是性能问题。
 
 这几个变体的存在，正说明"两态拆分"不是无脑切一刀：凡是语义上依赖"probe 全部结束"的输出（outer 未匹配、mark join 标记），都必须挂在 source 侧 eos 之后，而不能在 sink 侧或 probe 中途做。
 
-### 聚合：sink 攒哈希表、source 吐结果
+### 聚合：一个阻塞两态 + 一个非阻塞融合
 
-`AggSinkOperatorX`（`be/src/exec/operator/aggregation_sink_operator.h:135`）把输入按 group by key 聚进哈希表，`AggSourceOperatorX`（`be/src/exec/operator/aggregation_source_operator.h:94`）把聚合结果吐出去，共享 `AggSharedState`。除全量聚合外还有几个变体，从文件名即可读出：`streaming_aggregation_operator`（流式预聚合，边攒边吐、降低下游压力）、`distinct_streaming_aggregation_operator`（`DISTINCT`）、`partitioned_aggregation_sink_operator`（可落盘版，见 8.4）。选哪个由 FE 计划决定，BE 照单执行。
+聚合有两种形态，恰好演示了"阻塞算子拆两态"和"非阻塞算子不拆"两条路，值得并排看。
+
+**全量聚合（阻塞，拆两态）。** `AggSinkOperatorX`（`be/src/exec/operator/aggregation_sink_operator.h:135`）攒、`AggSourceOperatorX`（`be/src/exec/operator/aggregation_source_operator.h:94`）吐，共享 `AggSharedState`（`be/src/exec/pipeline/dependency.h:292`）。它和 hash join 一样是阻塞点——必须把**全部**输入按 group by key 聚完，才能吐第一行结果，所以拆成两条 pipeline，sink eos 唤醒 source。
+
+sink 侧按有没有 group by、以及是不是两阶段聚合的第二阶段，分三条执行路径（`be/src/exec/operator/aggregation_sink_operator.h:57`~`:63`）：无 group by 走 `_execute_without_key`（`:76`，全表聚成一行）；有 group by 的建表阶段走 `_execute_with_serialized_key`（`:80`，把行 emplace 进哈希表、就地累加聚合状态）；而两阶段聚合的第二阶段走 `_merge_with_serialized_key`（`:81`，输入已经是上游吐出来的**中间序列化状态**，这里做的是"合并部分聚合结果"而非"从原始行聚合"）。
+
+**tricky 点：serialize 与 finalize 是两回事，错配就结果错或多算。** source 侧吐结果时也分叉，取决于 `_needs_finalize`（`be/src/exec/operator/aggregation_source_operator.h:125`）：需要 finalize 就走 `_get_with_serialized_key_result`（把聚合状态**收尾**成最终值，如 `AVG` 的 sum/count 相除出真正的平均值）；不需要 finalize（即本算子只是两阶段聚合的第一阶段、结果还要发给下游再合并）就走 `_get_results_with_serialized_key`（原样吐出**序列化的中间状态**）。分派在 `be/src/exec/operator/aggregation_source_operator.cpp:60`~`:76` 按 `_needs_finalize` 绑定 `_executor.get_result`。为什么要分这么细？因为 `COUNT`、`AVG`、`HLL` 这类聚合的"中间状态"和"最终值"表示不同——第一阶段若错误地提前 finalize，第二阶段就拿不到可继续合并的状态、结果直接错（比如两个局部 `AVG` 不能直接再平均）；反过来该 finalize 的最后一阶段若漏了 finalize，输出的是一堆序列化状态而非数字。这正是"两态拆分 + 两阶段聚合"叠加后最容易写错的地方。
+
+**流式预聚合（非阻塞，不拆两态）。** `StreamingAggOperatorX`（`be/src/exec/operator/streaming_aggregation_operator.h:205`）是个 `StatefulOperatorX`（`be/src/exec/operator/operator.h:1092`）——**同时有 `push` 和 `pull`（`be/src/exec/operator/streaming_aggregation_operator.h:219`、`:218`）、不拆成两条 pipeline**。它不阻塞：来一批 `push` 进去做局部聚合、能吐就 `pull` 出来喂下游，靠 `need_more_input_data`（`be/src/exec/operator/operator.h:1108`）决定何时再要输入。它的作用是在 shuffle 前先把本地重复 key 聚掉一部分、减少下游最终聚合的数据量。
+
+**tricky 点：流式预聚合是"尽力而为"的，收益不够就 passthrough。** 如果数据几乎没有重复 group（key 基数极高），硬攒哈希表既占内存又聚不掉几行，纯亏。所以 `_should_expand_preagg_hash_tables`（`be/src/exec/operator/streaming_aggregation_operator.cpp:195`）会评估收益，判定不划算就**不再扩表、直接把原始行透传（passthrough）给下游**（`:306`）。此外开 spill 时它还受 `_spill_streaming_agg_mem_limit`（`be/src/exec/operator/streaming_aggregation_operator.h:266`）约束，避免这个"顺手做的优化"反而占太多内存。**错写会怎样**：去掉 passthrough 判定、一律强行预聚合，遇到高基数数据会内存暴涨且毫无过滤收益——这也是为什么它是 best-effort 而非强制。
+
+其余变体从文件名即可读出：`distinct_streaming_aggregation_operator`（`DISTINCT`）、`partitioned_aggregation_sink_operator`（可落盘版，见 8.4）。选哪个由 FE 计划决定，BE 照单执行。
 
 ### 排序：三种算法一个骨架
 
@@ -149,7 +161,7 @@ query 内存上限来自 `exec_mem_limit`（`fe/fe-core/src/main/java/org/apache
 
 **tricky 点：spill 是按分区递归的，且有降级。** 若单个分区仍然太大（数据倾斜、大量相同 key 挤在一个分区），probe 侧会对该分区**重分区（repartition）**——`repartition_current_partition`（`be/src/exec/operator/partitioned_hash_join_probe_operator.cpp:424`）用一个 FANOUT 大小的 partitioner 把它切成更细的子分区，递归下去。但递归不能无限：深度上限 `_repartition_max_depth`（默认 `SpillRepartitioner::MAX_DEPTH = 8`，`be/src/exec/spill/spill_repartitioner.h:74`）。**到达上限仍放不下会直接报错**（`be/src/exec/operator/partitioned_hash_join_probe_operator.cpp:429`~`:433`：`repartition exceeded max depth`），而不是死循环——这是有意的降级边界：8 层重分区还压不下的分区，几乎必然是极端倾斜（同一个 key 的行本身就超内存），继续切也无益，报错让用户去处理倾斜比让查询无声地耗尽资源更好。
 
-落盘文件由 `be/src/exec/spill/` 下的 `spill_file_writer`/`spill_file_reader`/`spill_file_manager` 管理，写到 `SpillDataDir`（`be/src/runtime/exec_env_init.cpp:232`）。
+落盘文件由 `be/src/exec/spill/` 下的 `spill_file_writer`/`spill_file_reader`/`spill_file_manager` 管理，写到 `SpillDataDir`（`be/src/runtime/exec_env_init.cpp:233`）。
 
 回读同样是一分区一分区来的。partitioned agg 的 source 侧 `PartitionedAggLocalState`（`be/src/exec/operator/partitioned_aggregation_source_operator.h:48`）用 `_recover_blocks_from_partition`（`:88`）把某个落盘分区的 block 读回、重新聚进一个内存哈希表再吐结果，处理完一个分区（`_current_partition`）再取下一个——**任一时刻内存里只有一个分区的聚合表**，这正是分区落盘"用磁盘把峰值内存摊平"的本质。读盘也是 I/O，同样挂依赖跨 yield 进行（reader 对象 `:111` 特意做成"跨 yield 存活"，避免每次调度重开文件）。这解释了为什么落盘查询不仅写慢、回读阶段也慢：source 侧要串行地把每个分区读回来重聚一遍。
 
