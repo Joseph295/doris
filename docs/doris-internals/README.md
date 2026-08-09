@@ -48,7 +48,7 @@ flowchart TD
 | 部分 | 一句话主题 | 状态 |
 |---|---|---|
 | 第一部分：全局架构与设计哲学 | 建立 FE / BE / MetaService 的职责边界与存算一体、存算分离两种形态的全局心智模型 | 已完成 |
-| 第二部分：一条查询 SQL 的一生 | 从 MySQL 协议接入到 Profile 精读，走完一次查询的完整执行路径 | 规划中 |
+| 第二部分：一条查询 SQL 的一生 | 从 MySQL 协议接入到 Profile 精读，走完一次查询的完整执行路径 | 已完成 |
 | 第三部分：一次导入的一生 | 从事务模型到 Compaction，走完一次写入的完整生命周期 | 规划中 |
 | 第四部分：元数据与 FE 内核 | Catalog 体系、持久化、高可用与存算分离元数据服务的内部机制 | 规划中 |
 | 第五部分：存储引擎深潜 | Rowset/Segment 文件格式、索引体系、读路径与主键模型内核 | 规划中 |
@@ -65,17 +65,17 @@ flowchart TD
 
 以下部分的章节规划摘自设计文档第 6 节，写作过程中如有增删会回到设计文档同步更新。
 
-### 第二部分：一条查询 SQL 的一生（规划中）
+### 第二部分：一条查询 SQL 的一生（已完成）
 
-1. 连接与协议：MySQL 协议接入、ConnectContext、查询入口
-2. 解析与合法化：词法语法解析到 LogicalPlan
-3. Nereids 优化器（上）：RBO 规则重写体系
-4. Nereids 优化器（下）：CBO、统计信息与代价模型
-5. 计划分发：Fragment 切分、Coordinator 调度与两种模式下的副本选择
-6. BE Pipeline 执行引擎：算子、依赖驱动调度、并行度
-7. Scan 路径：存算一体本地读 vs 存算分离 File Cache + 远端存储读
-8. Join / 聚合 / 排序算子与 Runtime Filter、Spill
-9. 结果回传与 Profile 精读：从 Profile 反推执行瓶颈
+1. [连接与协议](part2-query-lifecycle/01-connection-and-protocol.md)——MySQL 协议接入、ConnectContext、查询入口
+2. [解析与合法化](part2-query-lifecycle/02-parse-and-analyze.md)——词法语法解析到 LogicalPlan
+3. [Nereids 优化器（上）](part2-query-lifecycle/03-nereids-rbo.md)——RBO 规则重写体系
+4. [Nereids 优化器（下）](part2-query-lifecycle/04-nereids-cbo.md)——CBO、统计信息与代价模型
+5. [计划分发](part2-query-lifecycle/05-plan-distribution.md)——Fragment 切分、Coordinator 调度与两种模式下的副本选择
+6. [BE Pipeline 执行引擎](part2-query-lifecycle/06-pipeline-engine.md)——算子、依赖驱动调度、并行度
+7. [Scan 路径](part2-query-lifecycle/07-scan-path.md)——存算一体本地读 vs 存算分离 File Cache + 远端存储读
+8. [Join / 聚合 / 排序算子与 Runtime Filter、Spill](part2-query-lifecycle/08-operators-rf-spill.md)
+9. [结果回传与 Profile 精读](part2-query-lifecycle/09-result-and-profile.md)——从 Profile 反推执行瓶颈
 
 ### 第三部分：一次导入的一生（规划中）
 

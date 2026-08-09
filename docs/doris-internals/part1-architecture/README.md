@@ -14,4 +14,4 @@
 
 读完这五章，你应当能画出组件间的调用关系、说清一条数据从表到 Segment 的分层、判断任意一段源码在哪种模式下生效，并独立编出一个集群跑通回归用例。
 
-**下一部分预告**：[第二部分《一条查询 SQL 的一生》](../README.md#第二部分一条查询-sql-的一生规划中)——从 MySQL 协议接入的第一行代码开始，沿 `qe/` → `nereids/` → `planner/` → BE Pipeline 走完一次查询的完整执行路径。
+**下一部分预告**：[第二部分《一条查询 SQL 的一生》](../part2-query-lifecycle/README.md)——从 MySQL 协议接入的第一行代码开始，沿 `qe/` → `nereids/` → `planner/` → BE Pipeline 走完一次查询的完整执行路径。
