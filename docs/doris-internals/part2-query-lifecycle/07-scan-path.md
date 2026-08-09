@@ -142,7 +142,7 @@ SELECT * FROM t WHERE k > 1000000;   -- 谓词过滤掉大部分行
 
 **目标**：亲眼看一次 miss 比 hit 贵多少，把 7.3 的路径落到指标上。
 
-1. 存算分离集群上，对一张远端表跑一次查询，记下 profile 里 `FileCache` 组的指标（`be/src/io/cache/block_file_cache_profile.cpp`）：`BytesScannedFromCache`（`:125`）、`BytesScannedFromRemote`（`:127`）、`NumLocalIOTotal`（`:109`）、`NumRemoteIOTotal`（`:110`）、`RemoteIOUseTimer`（`:114`）、`BytesWriteIntoCache`（`:121`）。
+1. 存算分离集群上，对一张远端表跑一次查询，记下 profile 里 `FileCache` 组的指标（`be/src/io/cache/block_file_cache_profile.cpp`）：`BytesScannedFromCache`（`:125`）、`BytesScannedFromRemote`（`:127`）、`NumLocalIOTotal`（`:109`）、`NumRemoteIOTotal`（`:110`）、`RemoteIOUseTimer`（`:115`）、`BytesWriteIntoCache`（`:121`）。
 2. **制造冷 cache**：把 `clear_file_cache`（`be/src/common/config.cpp:1204`）临时置 true 清空、或缩小 `file_cache_path` 容量逼它淘汰，再跑同一条查询——这是"冷"的一次。
 3. **对比**：冷的一次 `BytesScannedFromRemote`、`NumRemoteIOTotal`、`RemoteIOUseTimer` 会显著抬高，`BytesWriteIntoCache` 非零（正在回填）；紧接着**不清 cache 再跑第二次**（热），`BytesScannedFromCache` 占绝对多数、`BytesScannedFromRemote` 趋近 0、查询耗时明显下降。
 
@@ -164,8 +164,8 @@ SELECT * FROM t WHERE k > 1000000;   -- 谓词过滤掉大部分行
 
 ### 症状 C：对象存储限流报错的识别
 
-- **看 S3 侧 429 / TooManyRequests。** 存算分离下若对象存储被打限流，`S3FileReader::read_at_impl`（`be/src/io/fs/s3_file_reader.cpp:162`）会对 HTTP 429（`TOO_MANY_REQUESTS`）做指数退避重试（最多 `max_s3_client_retry` 次，`be/src/common/config.cpp:1494`，默认 10），并累加 `s3_file_reader_too_many_request_counter` 这个 bvar（`be/src/io/fs/s3_file_reader.cpp:174`）。表现是 scan 延迟突然抬高且抖动大、BE 日志里出现 "read s3 file ... succeed after N times" 的重试日志。**根因通常是 cache 命中率过低导致 S3 QPS 打满**——治标是降并发/加退避，治本还是回到症状 B 把命中率提上去，让绝大多数读不去打对象存储。
+- **看 S3 侧 429 / TooManyRequests。** 存算分离下若对象存储被打限流，`S3FileReader::read_at_impl`（`be/src/io/fs/s3_file_reader.cpp:162`）会对 HTTP 429（`TOO_MANY_REQUESTS`）做指数退避重试（最多 `max_s3_client_retry` 次，`be/src/common/config.cpp:1494`，默认 10），并累加 `s3_file_reader_too_many_request_counter` 这个 bvar（`be/src/io/fs/s3_file_reader.cpp:173`）。表现是 scan 延迟突然抬高且抖动大、BE 日志里出现 "read s3 file ... succeed after N times" 的重试日志。**根因通常是 cache 命中率过低导致 S3 QPS 打满**——治标是降并发/加退避，治本还是回到症状 B 把命中率提上去，让绝大多数读不去打对象存储。
 
 ---
 
-本章走完了查询链路的最底层——数据怎么从存储读上来喂给 pipeline。存算一体走本地盘：`ScannerContext` 作为生产者-消费者交汇点，`ScannerScheduler` 的独立线程池里 scanner 阻塞地读、`ScanOperatorX` 在 pipeline 线程里非阻塞地取，两边用 scan `Dependency` 缝合，并发靠 `_max_scan_concurrency`、内存靠 `_max_bytes_in_queue` 两维背压兜住；我们重点抠了本地/远端两套线程池别配错、队列内存上限按列数放大的算法、以及 tablet 又多又小时调度开销反超 IO 的反直觉拐点。存算分离把最底层 `read()` 换成 `CachedRemoteFileReader`：以 1MB block 为粒度、四条 LRU 队列分类缓存、miss 走 S3 读回并回填；我们把一次 miss 的完整路径（对齐→get_or_set→按 block 状态分派→远端读→回填）画成了图，并解释了 `file_cache_path` 容量与磁盘实际的关系、以及淘汰抖动为什么让冷查询延迟周期性出现。两模式的差异被完全封装在底层 `FileReader` 的多态里，上层无感——这也让"分离模式容量规划=算命中率"成为一条独立于查询逻辑的运维准则。下一章转向另一类难题：数据倾斜时，scan 出来的数据在算子间怎么重分布才不至于把某个 task 压垮。
+本章走完了查询链路的最底层——数据怎么从存储读上来喂给 pipeline。存算一体走本地盘：`ScannerContext` 作为生产者-消费者交汇点，`ScannerScheduler` 的独立线程池里 scanner 阻塞地读、`ScanOperatorX` 在 pipeline 线程里非阻塞地取，两边用 scan `Dependency` 缝合，并发靠 `_max_scan_concurrency`、内存靠 `_max_bytes_in_queue` 两维背压兜住；我们重点抠了本地/远端两套线程池别配错、队列内存上限按列数放大的算法、以及 tablet 又多又小时调度开销反超 IO 的反直觉拐点。存算分离把最底层 `read()` 换成 `CachedRemoteFileReader`：以 1MB block 为粒度、四条 LRU 队列分类缓存、miss 走 S3 读回并回填；我们把一次 miss 的完整路径（对齐→get_or_set→按 block 状态分派→远端读→回填）画成了图，并解释了 `file_cache_path` 容量与磁盘实际的关系、以及淘汰抖动为什么让冷查询延迟周期性出现。两模式的差异被完全封装在底层 `FileReader` 的多态里，上层无感——这也让"分离模式容量规划=算命中率"成为一条独立于查询逻辑的运维准则。下一章从"数据怎么读上来"转向"读上来之后怎么算"：join、聚合、排序这三个最"重"的算子怎么组织 sink/source 两态与内存，Runtime Filter 怎么把 build 侧算出的过滤条件回推到 scan 侧少读无用行，以及内存不够时 Spill 怎么把算子状态落盘——其中数据倾斜作为一条贯穿的风险点会反复出现。

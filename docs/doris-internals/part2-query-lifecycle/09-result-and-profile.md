@@ -78,7 +78,7 @@ flowchart LR
 
 **BE 埋点与上报。** 每个算子在自己的 `RuntimeProfile`（`be/src/runtime/runtime_profile.h:98`）上 `ADD_TIMER`/`ADD_COUNTER` 埋点，如 scan 的 `ScanRows`（`be/src/exec/operator/scan_operator.cpp:1101`，名字常量在 `be/src/runtime/runtime_profile_counter_names.h:78`）、`RowsRead`（`:1065` / `be/src/runtime/runtime_profile_counter_names.h:76`）。这些计数由 `RuntimeQueryStatisticsMgr`（`be/src/runtime/runtime_query_statistics_mgr.h:38`）周期性序列化成 `TRuntimeProfileTree`、经 brpc 上报（`report_runtime_query_statistics`，`be/src/runtime/runtime_query_statistics_mgr.cpp:338`）。FE 入口是 `FrontendServiceImpl.reportExecStatus`（`fe/fe-core/src/main/java/org/apache/doris/service/FrontendServiceImpl.java:1039`），落到 `ExecutionProfile.updateProfile`（`fe/fe-core/src/main/java/org/apache/doris/common/profile/ExecutionProfile.java:256`）按 fragment 建起 FE 侧的 `RuntimeProfile` 树（`fe/fe-core/src/main/java/org/apache/doris/common/profile/RuntimeProfile.java:57`），最后由 `Profile`（`fe/fe-core/src/main/java/org/apache/doris/common/profile/Profile.java:102`）汇总、`ProfileManager` 存储供查看。
 
-**tricky 点一：Profile 是"多实例合并"的产物，一个计数器背后是一群实例。** 同一个算子在多实例/多 BE 上各有一份 profile，FE 用 `mergeProfiles`（`fe/fe-core/src/main/java/org/apache/doris/common/profile/RuntimeProfile.java:514`）把它们合并成一份，每个计数器变成一个 `AggCounter`（`fe/fe-core/src/main/java/org/apache/doris/common/profile/AggCounter.java:23`），打印成 `avg ..., max ..., min ...`（`AggCounter.print`，`:68`~`:90`）。**这行 `avg/max/min` 就是读 profile 的信息金矿**：一个耗时计数器 `max` 远大于 `min`，意味着某个实例拖了后腿——这正是数据倾斜的指纹（见 9.4、9.6）。若只看 avg，倾斜会被平均掉、完全看不出来。
+**tricky 点一：Profile 是"多实例合并"的产物，一个计数器背后是一群实例。** 同一个算子在多实例/多 BE 上各有一份 profile，FE 用 `mergeProfiles`（`fe/fe-core/src/main/java/org/apache/doris/common/profile/RuntimeProfile.java:514`）把它们合并成一份，每个计数器变成一个 `AggCounter`（`fe/fe-core/src/main/java/org/apache/doris/common/profile/AggCounter.java:22`），打印成 `avg ..., max ..., min ...`（`AggCounter.print`，`:68`~`:90`）。**这行 `avg/max/min` 就是读 profile 的信息金矿**：一个耗时计数器 `max` 远大于 `min`，意味着某个实例拖了后腿——这正是数据倾斜的指纹（见 9.4、9.6）。若只看 avg，倾斜会被平均掉、完全看不出来。
 
 **tricky 点二：某个 instance 在 profile 里"缺失"意味着什么。** 合并时若某份 profile 里找不到对应计数器，代码是**静默跳过**的（`fe/fe-core/src/main/java/org/apache/doris/common/profile/RuntimeProfile.java:563`~`:567` 注释明说 "ignore the counter if it is not found"）。所以 profile 里某个 fragment 的实例数比预期少，**不等于那些实例没干活、也不等于它们干的活是 0**——而是它们**根本没上报**：可能还没跑完就被取消、可能 BE 崩了、可能上报超时被丢。把"缺失"错当成"0 耗时/0 行"是读 profile 最常见的误判之一。看到实例数对不上，第一反应应是"少的那些去哪了"，而不是"它们没贡献"。
 
@@ -151,7 +151,7 @@ DetailProfile:
 
 **目标**：把 9.4 的"总耗时 → 最长 fragment → 最长算子 → 关键计数器"跑通一次，写出你自己的瓶颈结论。
 
-造一张较大的事实表 `big`（几千万行、有一列 `k` 做 join key、一列 `g` 做分组）和一张维表 `dim`，跑一条既有 join 又有聚合的查询：
+造一张较大的事实表 `big`（几千万行，建表列含 `k` 做 join key、`g` 做分组、`v` 做聚合的数值列）和一张维表 `dim`，跑一条既有 join 又有聚合的查询：
 
 ```sql
 SET enable_profile = true;                 -- 必须查询前就开，否则事后拿不到（9.3）

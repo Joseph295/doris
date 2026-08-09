@@ -9,7 +9,7 @@
 | [第 3 章](03-nereids-rbo.md) | Nereids 优化器（上） | RBO 等价重写、规则批的隐含依赖与收敛、谓词下推在 outer join 的陷阱 |
 | [第 4 章](04-nereids-cbo.md) | Nereids 优化器（下） | Memo 搜索空间、统计与代价模型、分布属性与 Exchange 插入决策 |
 | [第 5 章](05-plan-distribution.md) | 计划分发 | Fragment 在 Exchange 处切分、并行实例展开、两模式副本选择分叉 |
-| [第 6 章](06-pipeline-engine.md) | Pipeline 执行引擎 | 阻塞点切分 pipeline、`Dependency` 依赖驱动调度、禁止同步阻塞 IO |
+| [第 6 章](06-pipeline-engine.md) | BE Pipeline 执行引擎 | 阻塞点切分 pipeline、`Dependency` 依赖驱动调度、禁止同步阻塞 IO |
 | [第 7 章](07-scan-path.md) | Scan 路径 | 异步 scanner + 背压、本地直读 vs File Cache 远端读、命中率与容量规划 |
 | [第 8 章](08-operators-rf-spill.md) | 核心算子 | Join/聚合/排序的两态拆分、Runtime Filter 与 Spill 的 tricky 语义 |
 | [第 9 章](09-result-and-profile.md) | 结果与 Profile | 结果 pull 链与取消传播、Profile 生成、按指纹定位瓶颈的方法论 |

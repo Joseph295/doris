@@ -63,8 +63,6 @@ flowchart TD
 4. [两种架构形态](part1-architecture/04-two-architectures.md)——存算一体 vs 存算分离的本质差异
 5. [源码地图与开发环境](part1-architecture/05-source-map-and-dev-env.md)——仓库结构导览、编译（ASAN）、调试器接入、三类测试框架
 
-以下部分的章节规划摘自设计文档第 6 节，写作过程中如有增删会回到设计文档同步更新。
-
 ### 第二部分：一条查询 SQL 的一生（已完成）
 
 1. [连接与协议](part2-query-lifecycle/01-connection-and-protocol.md)——MySQL 协议接入、ConnectContext、查询入口
@@ -74,8 +72,10 @@ flowchart TD
 5. [计划分发](part2-query-lifecycle/05-plan-distribution.md)——Fragment 切分、Coordinator 调度与两种模式下的副本选择
 6. [BE Pipeline 执行引擎](part2-query-lifecycle/06-pipeline-engine.md)——算子、依赖驱动调度、并行度
 7. [Scan 路径](part2-query-lifecycle/07-scan-path.md)——存算一体本地读 vs 存算分离 File Cache + 远端存储读
-8. [Join / 聚合 / 排序算子与 Runtime Filter、Spill](part2-query-lifecycle/08-operators-rf-spill.md)
+8. [Join / 聚合 / 排序算子与 Runtime Filter、Spill](part2-query-lifecycle/08-operators-rf-spill.md)——核心算子与 Runtime Filter、Spill
 9. [结果回传与 Profile 精读](part2-query-lifecycle/09-result-and-profile.md)——从 Profile 反推执行瓶颈
+
+以下部分的章节规划摘自设计文档第 6 节，写作过程中如有增删会回到设计文档同步更新。
 
 ### 第三部分：一次导入的一生（规划中）
 
