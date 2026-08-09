@@ -4,7 +4,7 @@
 
 读完本章，你应当能拿到任意一个陌生的类名或目录，30 秒内判断它属于哪个组件、后续哪一部分会深挖它；能独立编出一个 ASAN 集群、拉起单机部署、跑通一个回归用例；能在遇到问题时选对调试手段（日志 / 调试器 / UT / 回归）而不是盲目重启。本章是后续所有部分"动手实验"段的地基——从第二部分起，实验环节不再重复环境说明，只说"按第 5 章编好、拉起集群"，细节都在这里。
 
-本章的行号引用基于当前 master（`git rev-parse --short HEAD` 为 `b9559caa35`）。代码演进会让行号漂移，但目录结构与脚本参数不变；写作时每一处命令都在当前仓库里核实过，未凭记忆或旧资料落笔。
+本章的行号引用基于写作时核实所用的 HEAD（`b9559caa35`，源码树与系列基线 `7bc98f696f` 一致）。代码演进会让行号漂移，但目录结构与脚本参数不变；写作时每一处命令都在当前仓库里核实过，未凭记忆或旧资料落笔。
 
 ## 5.1 仓库总地图
 
@@ -67,7 +67,7 @@ FE 的核心代码集中在 `fe/fe-core/src/main/java/org/apache/doris/` 下，�
 - **`clone/`** —— 存算一体的副本调度与修复：`TabletScheduler`、`TabletChecker`。part4 调度体系；存算分离下这一套基本闲置（第 4 章 4.3）。
 - **`datasource/`** —— 外部数据源联邦（Catalog 体系：Hive/Iceberg/JDBC 等）。part4 外部数据源章。
 - **`mysql/`** —— MySQL 网络协议层的编解码。part2 连接与协议章。
-- **`cloud/`** —— 存算分离的 FE 侧全部专属类（`CloudEnv`、`CloudGlobalTransactionMgr` 等，第 4 章 4.4 数过约 50 个类）。读到这个包，默认它只在 cloud mode 生效。
+- **`cloud/`** —— 存算分离的 FE 侧全部专属类（`CloudEnv`、`CloudGlobalTransactionMgr` 等，第 4 章 4.6 数过约 50 个类）。读到这个包，默认它只在 cloud mode 生效。
 
 ### tricky 点：analysis/ 是个"名字活下来、角色已死"的目录
 
@@ -303,7 +303,7 @@ Expected equality of these values:
 
 - **先看日志，而不是重启**：FE 起不来看 `output/fe/log/fe.log` 与 `output/fe/log/fe.out`；BE 起不来看 `output/be/log/be.INFO` 与 `output/be/log/be.out`（崩溃堆栈通常在 `.out` 里）。
 - **端口被占用**：日志里出现 `bind` 失败 / `Address already in use`。根因是 5.4 列的那组端口与其它进程冲突。解决：改 `output/{fe,be}/conf/` 里的端口后重启。
-- **`priority_networks` 配错**：进程本身可能起来了，但 BE 加不进集群（`Alive` 恒 false），`be.INFO` 里有 `not equal to backend localhost` 类日志。这是第 2 章 2.6 实验二的坑，完整定位见那里。
+- **`priority_networks` 配错**：进程本身可能起来了，但 BE 加不进集群（`Alive` 恒 false），`be.INFO` 里有 `not equal to to backend localhost` 类日志（注：两个 to 连写是源码原文的笔误，照抄源码才能精确搜到）。这是第 2 章 2.6 实验二的坑，完整定位见那里。
 - **JAVA_HOME / JDK 版本不对**：FE 起不来且 `fe.out` 报 Java 相关错误。核对 `JAVA_HOME` 指向的 JDK 版本符合当前 master 要求。
 
 ---

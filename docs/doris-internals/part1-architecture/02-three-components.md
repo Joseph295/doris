@@ -4,7 +4,7 @@
 
 读完本章，你应当能在脑子里为任意一次请求先定位到"这该由哪个进程负责"，并且知道到源码里的哪个对象去找它——这三个锚点（**FE 的钥匙是 `Env`、BE 的钥匙是 `ExecEnv` + `StorageEngine`、MS 的钥匙是 `MetaServiceImpl`**）会在后面第二、三部分反复被引用。
 
-本章的行号引用基于当前 master（`git rev-parse --short HEAD` 为 `a96f995a8b`）。代码演进会让行号漂移，但对象名与结构不变；写作时每一处都在当前代码里核实过。
+本章的行号引用基于写作时核实所用的 HEAD（`a96f995a8b`，源码树与系列基线 `7bc98f696f` 一致）。代码演进会让行号漂移，但对象名与结构不变；写作时每一处都在当前代码里核实过。
 
 ## 2.1 问题：一个分布式数据库的职责应该怎么切
 
@@ -116,7 +116,7 @@ BE 的进程入口是 `be/src/service/doris_main.cpp:317` 的 `main`。和 FE �
 4. **HTTP server**（`be/src/service/doris_main.cpp:643`-`646`，默认 `webserver_port` 8040）：metrics、profile、部分导入接入；
 5. **心跳 server**（`be/src/service/doris_main.cpp:650`-`657`，默认 `heartbeat_service_port` 9050）：接收 FE 心跳，是 BE 认识集群的唯一入口，2.3 后半段的主角。
 
-同样，记住这四个对外端口（9060/8060/8040/9050），加上 FE 的三个，一套单机集群的全部监听口就齐了。
+同样，记住这四个对外端口（9060/8060/8040/9050），加上 FE 的三个，一套单机集群的全部监听口就齐了（多 FE / 主从选举场景还有 bdbje 的 edit_log_port 9010，见第 5 章 5.4）。
 
 ### ExecEnv 与 StorageEngine：执行期资源 vs 存储生命周期
 
@@ -295,7 +295,7 @@ priority_networks = 192.168.99.0/24
 
 重启 BE，然后在 FE 上重新 `ALTER SYSTEM ADD BACKEND` 这台 BE（注意 ADD BACKEND 里写的地址要与 BE 实际宣告的对不上，矛盾就在这里制造出来）。
 
-**现象与定位：** `SHOW BACKENDS` 的 `Alive` 长期为 `false`，且 `SHOW BACKENDS` 的 `Status`/错误信息里能看到心跳异常。根因在 2.3 提到的那段代码：FE 发心跳时会把它登记的 BE 地址塞进 `TMasterInfo.backend_ip`（`fe/fe-core/src/main/java/org/apache/doris/system/HeartbeatMgr.java:296` 处 `copiedMasterInfo.setBackendIp(...)`），BE 收到后在 `be/src/agent/heartbeat_server.cpp:135`-`187` 里拿这个地址和自己 `priority_networks` 算出的本机 IP 比对——对不上就会在 `be.INFO` 里打出 `not equal to backend localhost`，甚至返回错误导致心跳失败。
+**现象与定位：** `SHOW BACKENDS` 的 `Alive` 长期为 `false`，且 `SHOW BACKENDS` 的 `Status`/错误信息里能看到心跳异常。根因在 2.3 提到的那段代码：FE 发心跳时会把它登记的 BE 地址塞进 `TMasterInfo.backend_ip`（`fe/fe-core/src/main/java/org/apache/doris/system/HeartbeatMgr.java:296` 处 `copiedMasterInfo.setBackendIp(...)`），BE 收到后在 `be/src/agent/heartbeat_server.cpp:135`-`187` 里拿这个地址和自己 `priority_networks` 算出的本机 IP 比对——对不上就会在 `be.INFO` 里打出 `not equal to to backend localhost`（注：两个 to 连写是源码原文的笔误，照抄源码才能精确搜到），甚至返回错误导致心跳失败。
 
 这个实验的价值在于：一旦线上遇到"BE 死活加不进来、Alive 一直 false"，你的第一反应就该是去 `be.INFO` 搜 `localhost` 相关日志、核对两边的 `priority_networks` 与 ADD BACKEND 地址是否指向同一个 IP——而不是漫无目的地重启。
 
@@ -306,7 +306,7 @@ priority_networks = 192.168.99.0/24
 **症状 A：BE 加不进集群（`SHOW BACKENDS` 的 Alive 一直 false）。**
 - 先看 `output/be/log/be.INFO`：
   - 搜到 `invalid cluster id`（`be/src/agent/heartbeat_server.cpp:125`-`131`）→ 这台 BE 之前属于别的集群，data 目录里残留了旧 cluster id，清理数据目录或换新盘重加。
-  - 搜到 `not equal to backend localhost` / `cannot found the local ip`（`be/src/agent/heartbeat_server.cpp:135`-`187`）→ `priority_networks` 配错网段，或 ADD BACKEND 写的地址与 BE 实际 IP 不一致（即实验二的坑）。
+  - 搜到 `not equal to to backend localhost` / `cannot found the local ip`（`be/src/agent/heartbeat_server.cpp:135`-`187`）→ `priority_networks` 配错网段，或 ADD BACKEND 写的地址与 BE 实际 IP 不一致（即实验二的坑）。
 - 再确认 BE 的 `heartbeat_service_port`（9050）没被防火墙挡、没和别的进程抢端口——FE 连不上这个口，心跳根本发不出去。
 
 **症状 B：BE 曾经正常，突然心跳丢失（Alive 从 true 变 false）。**

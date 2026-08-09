@@ -4,7 +4,7 @@
 
 读完本章，你应当能在脑子里画出 **Table → Partition → MaterializedIndex → Tablet → Rowset → Segment** 这条从逻辑到物理的完整链路，知道每一层"是谁、归谁管、为什么要有这一层"，并且理解 Duplicate/Unique/Aggregate 三种数据模型为什么能共用同一套存储引擎。这条层级和这三种模型，是第三部分（导入主线）和第五部分（存储与读写路径）反复要回来引用的地基。
 
-本章的行号引用基于当前 master（`git rev-parse --short HEAD` 为 `454f97ce63`）。代码演进会让行号漂移，但对象名与结构不变；写作时每一处都在当前代码里核实过。
+本章的行号引用基于写作时核实所用的 HEAD（`454f97ce63`，源码树与系列基线 `7bc98f696f` 一致）。代码演进会让行号漂移，但对象名与结构不变；写作时每一处都在当前代码里核实过。
 
 ## 3.1 问题：海量数据怎么切才能又好写又好查
 
@@ -104,8 +104,7 @@ classDiagram
 flowchart TB
     subgraph BEDisk["BE 本地盘: storage_root_path"]
         direction TB
-        T["Tablet 目录<br/>data/{shard_id}/{tablet_id}/{schema_hash}/"]
-        subgraph T
+        subgraph TDIR["Tablet 目录<br/>data/{shard_id}/{tablet_id}/{schema_hash}/"]
             RS0["Rowset [0-1]<br/>(建表初始空版本)"]
             RS1["Rowset [2-2]<br/>{rowset_id}_0.dat<br/>{rowset_id}_1.dat"]
             RS2["Rowset [3-3]<br/>{rowset_id}_0.dat"]
