@@ -66,15 +66,16 @@ sequenceDiagram
     Note over FE: 此后查询才读到这批数据
 ```
 
-### tricky 点一：publish 是异步尽力而为——"卡在 COMMITTED"的三种真成因
+### tricky 点一：publish 是异步尽力而为——"卡在 COMMITTED"的成因
 
-`PublishVersionDaemon` 是**周期驱动、逐 tablet 尽力而为**的：它把版本发下去，成功的 tablet 就地生效，失败的 tablet 进 `error_tablet_ids`、**下个周期继续重试**，直到全成或超时。这套"尽力而为 + 重试"很稳健，但也意味着 publish 可能**长时间推不动**，事务卡在 `COMMITTED` 迟迟不 `VISIBLE`。运维里"提交成功了但就是查不到"，十有八九卡在这里。它的真成因有三，各自的机理和"错写会怎样"都不同：
+`PublishVersionDaemon` 是**周期驱动、逐 tablet 尽力而为**的：它把版本发下去，成功的 tablet 就地生效，失败的 tablet 进 `error_tablet_ids`、**下个周期继续重试**，直到全成或超时。这套"尽力而为 + 重试"很稳健，但也意味着 publish 可能**长时间推不动**，事务卡在 `COMMITTED` 迟迟不 `VISIBLE`。运维里"提交成功了但就是查不到"，十有八九卡在这里。真正阻塞 publish 的成因有两类，各自的机理和"错写会怎样"都不同：
 
-- **成因一：目标副本所在 BE 宕机。** publish 发给所有 BE，宕机 BE 的任务当然完不成。但这**通常不阻塞**——`shouldFinishTxn` 的判据是"有没有**活着且未完成**的 BE 任务"（`fe/fe-core/src/main/java/org/apache/doris/transaction/PublishVersionDaemon.java:227`），宕机 BE 不 alive，不计入阻塞；只要活着的多数副本 publish 成功，事务照样能 finish 到 `VISIBLE`（落后的那个副本靠 4.1 的修复线补）。真正卡住的是**活着但迟迟不完成**的 BE——它没死、任务却因为下面两种原因返回失败，于是被反复重试。
-- **成因二：目标 tablet 版本太多（`-235` / `TOO_MANY_VERSION`）。** publish 时要把 rowset add 进 tablet 版本链，如果这个 tablet 的版本数已经撞上 `max_tablet_version_num`（第 2 部分已验证 `-235` = `TOO_MANY_VERSION`，见 `be/src/common/status.h`、`be/src/common/config.cpp`），add 直接失败，tablet 进 `error_tablet_ids`，这个版本 publish 不成功、周期性重试。根因往往是 compaction 追不上导入（版本堆积），得先让 compaction 跟上（详见本部分后续 compaction 章）。
-- **成因三：版本不连续 / schema change 冲突。** 版本链**必须连续**——tablet 只能 add 进 `max_version + 1`。`be/src/storage/task/engine_publish_version_task.cpp` 里显式判断：若 `version.first != max_version + 1` 且这个版本不是已存在的（`be/src/storage/task/engine_publish_version_task.cpp:216` 一带），就走 `_handle_publish_version_not_continuous`（`be/src/storage/task/engine_publish_version_task.cpp:332`）——**等前序版本先 publish**，日志会打 `version not continuous`（`be/src/storage/task/engine_publish_version_task.cpp:370`，主键表还会打 `uniq key with merge-on-write version not continuous`，`:380`）。这意味着 publish 存在**队头阻塞**：一个较早的事务卡住（比如撞了 `-235`），排在它后面的所有事务都会因为"前序版本没到"而堆在它身后，一起卡 `COMMITTED`。schema change 期间对版本连续性的要求更严（`be/src/storage/task/engine_publish_version_task.cpp:216`~`236` 那段对 schema change 窗口做了额外的连续性判断）。
+- **成因一：目标副本所在 BE 宕机。** publish 发给所有 BE，宕机 BE 的任务当然完不成。但这**通常不阻塞**——`shouldFinishTxn` 的判据是"有没有**活着且未完成**的 BE 任务"（`fe/fe-core/src/main/java/org/apache/doris/transaction/PublishVersionDaemon.java:227`），宕机 BE 不 alive，不计入阻塞；只要活着的多数副本 publish 成功，事务照样能 finish 到 `VISIBLE`（落后的那个副本靠 4.1 的修复线补）。真正卡住的是**活着但迟迟不完成**的 BE——它没死、任务却因为下面的版本不连续返回失败，于是被反复重试。
+- **成因二：版本不连续 / schema change 冲突（队头阻塞）。** 版本链**必须连续**——tablet 只能 add 进 `max_version + 1`。`be/src/storage/task/engine_publish_version_task.cpp` 里显式判断：若 `version.first != max_version + 1` 且这个版本不是已存在的（`be/src/storage/task/engine_publish_version_task.cpp:216` 一带），就走 `_handle_publish_version_not_continuous`（`be/src/storage/task/engine_publish_version_task.cpp:332`）——**等前序版本先 publish**，日志会打 `version not continuous`（`be/src/storage/task/engine_publish_version_task.cpp:370`，主键表还会打 `uniq key with merge-on-write version not continuous`，`:380`）。这意味着 publish 存在**队头阻塞**：一个较早的事务因为副本原因卡住，排在它后面的所有事务都会因为"前序版本没到"而堆在它身后，一起卡 `COMMITTED`。schema change 期间对版本连续性的要求更严（`be/src/storage/task/engine_publish_version_task.cpp:216`~`236` 那段对 schema change 窗口做了额外的连续性判断）。
 
-**错写会怎样？** 假如 publish 图省事，允许"跳过缺口版本、直接把后面的版本接上"——版本链就断了一段，查询按连续版本区间取数时会**读到缺一截的数据**（第 1 部分 3.3 讲过版本区间语义）。所以宁可让后面的事务全部排队等，也绝不能跳版本 publish。另一个常见误判：看到事务卡在 `COMMITTED`，就想"abort 掉重来"——但 `COMMITTED` 是不可回滚的终定态，正确动作是**让 publish 重试直到 `VISIBLE`**（或排查并解除卡点，如降版本数、修副本），而不是 abort。
+**一个常被误挂在 publish 头上的锅：`-235` / `TOO_MANY_VERSION` 其实发生在写入阶段，不在 publish。** 直觉上容易以为"tablet 版本太多导致 publish 时 add rowset 失败"，但核对代码会发现 publish 路径**根本没有版本数检查**：`-235`（第 2 部分已验证 `-235` = `TOO_MANY_VERSION`）只在 `RowsetBuilder::check_tablet_version_count`（`be/src/storage/rowset_builder.cpp:182`）里抛，而它由 `RowsetBuilder::init`（`be/src/storage/rowset_builder.cpp:212`，第 222 行调用）触发——那是第 3 章的**写入/prepare 阶段，发生在 commit 之前**。撞 `-235` 的导入在写入时就 fast-fail 了，根本走不到 `COMMITTED`，更谈不上卡 publish。它和成因二其实是**版本堆积**这同一个根因的两副面孔：publish 侧表现为队头阻塞（成因二里"前序事务卡住"堆积版本），写入侧表现为**后续导入在 prepare 阶段直接报 `-235`**。两者根因都是 compaction 追不上导入，缓解都得让 compaction 跟上（详见本部分后续 compaction 章）；但排查入口不同——`-235` 要在写入报错里找，别去翻 publish 日志。
+
+**错写会怎样？** 假如 publish 图省事，允许"跳过缺口版本、直接把后面的版本接上"——版本链就断了一段，查询按连续版本区间取数时会**读到缺一截的数据**（第 1 部分 3.3 讲过版本区间语义）。所以宁可让后面的事务全部排队等，也绝不能跳版本 publish。另一个常见误判：看到事务卡在 `COMMITTED`，就想"abort 掉重来"——但 `COMMITTED` 是不可回滚的终定态，正确动作是**让 publish 重试直到 `VISIBLE`**（或排查并解除卡点，如修副本、等前序 publish），而不是 abort。
 
 ### 易错点：`visibleVersion` 与 `nextVersion` 的差值就是积压深度
 
@@ -134,7 +135,7 @@ RPC 落到 `MetaServiceImpl::commit_txn`（`cloud/src/meta-service/meta_service_
 | 版本推进落点 | 分两处：FE 定版本号（commit），各 BE 各自接版本链（publish） | 一处：MetaService 在一次 FDB 事务里改元数据 |
 | 可见性动作 | 异步 publish，逐 tablet 尽力而为 + 重试 | 无独立 publish；FDB 事务提交即可见，BE pull/push 发现 |
 | 失败原子性 | tablet 级：部分 tablet 可先可见，失败的重试 | 事务级：FDB 事务整体成败，要么全可见要么整体重试 |
-| "卡 COMMITTED" 对应什么 | publish 积压（副本慢 / `-235` / 版本不连续），可长时间卡 | **没有这个窗口**；卡点前移到 commit 本身——FDB 冲突重试、delete bitmap 锁抢不到、事务过大转 lazy commit |
+| "卡 COMMITTED" 对应什么 | publish 积压（副本慢 / 版本不连续队头阻塞），可长时间卡 | **没有这个窗口**；卡点前移到 commit 本身——FDB 冲突重试、delete bitmap 锁抢不到、事务过大转 lazy commit |
 
 一句话概括这张表：**存算一体把"可见"做成了 commit 之后一段可观测、可能卡住的异步过程；存算分离把"可见"折叠进了 commit 那一次原子事务，代价是把并发压力集中到了 FDB 的这次提交上。**
 
@@ -194,15 +195,16 @@ FDB 是**乐观并发控制**：一个事务提交时，如果它读过的 key �
 ### 症状 B：publish 积压——怎么看深度与卡点
 
 - **看深度**：`积压深度 = committedVersion − visibleVersion = (nextVersion−1) − visibleVersion`（`fe/fe-core/src/main/java/org/apache/doris/catalog/Partition.java:245`）。用 `SHOW PARTITIONS` 盯 `VisibleVersion`（`fe/fe-core/src/main/java/org/apache/doris/common/proc/PartitionsProcDir.java:112`）涨不涨；`SHOW PROC '/transactions/<dbId>/running'` 里堆积的 `COMMITTED` 事务个数就是直观的积压。
-- **找卡点**：到目标 BE 的 `be.INFO` 搜三类关键字——`version not continuous`（`be/src/storage/task/engine_publish_version_task.cpp:370`，版本队头阻塞，找那个卡住的最早版本事务）、`TOO_MANY_VERSION` / `-235`（tablet 版本超限，compaction 没追上）、以及 publish 失败的 tablet 报告。定位到最早卡住的那个 tablet/版本，解除它（降版本数、修副本、等前序 publish），后面排队的自然疏通。
+- **找卡点**：到目标 BE 的 `be.INFO` 搜 `version not continuous`（`be/src/storage/task/engine_publish_version_task.cpp:370`，版本队头阻塞，找那个卡住的最早版本事务）以及 publish 失败的 tablet 报告。定位到最早卡住的那个 tablet/版本，解除它（修副本、等前序 publish），后面排队的自然疏通。
+- **别把 `-235` 当 publish 卡点找**：如果**同时**有新导入报 `-235` / `TOO_MANY_VERSION`，那是版本堆积已经严重到**写入侧**也开始 fast-fail——它抛在 `RowsetBuilder::init`（`be/src/storage/rowset_builder.cpp:212`）的 prepare 阶段，不在 publish 日志里。它和 publish 队头阻塞是同一个根因（compaction 落后）的两副面孔，根治都是让 compaction 追上。
 - **别做的动作**：不要去 abort 一个卡在 `COMMITTED` 的事务——它不可回滚，正确做法是让 publish 重试直到 `VISIBLE`（4.2 tricky 点一）。
 
 ### 症状 C：存算分离 commit 冲突重试的日志特征
 
 - **FE 侧指纹**：搜 `commitTxn KV_TXN_CONFLICT, transactionId:..., retryTime:...`（`fe/fe-core/src/main/java/org/apache/doris/cloud/transaction/CloudGlobalTransactionMgr.java:840` 一带打的日志）。`retryTime` 涨得高，说明这个事务反复撞 FDB 冲突。
 - **MetaService 侧指纹**：搜 `fdb commit error`（`cloud/src/meta-store/txn_kv.cpp:887`）并看冲突计数指标 `g_bvar_txn_kv_commit_conflict_counter`。冲突集中在少数分区，基本可断定是**高频提交到同一热点分区**争抢 `partition_version_key`（4.3 tricky 点）。
-- **缓解方向**：降低对单一分区的提交频率——增大导入攒批、合并高频小导入、减少并发写同一分区的作业数。若是超大事务反复触发 lazy commit 路径（`commit_txn_eventually`，`cloud/src/meta-service/meta_service_txn.cpp:2188`），则要减少单批涉及的分区/tablet 数（错误信息里会提示 "reduce the number of partitions involved in the load"）。
+- **缓解方向**：降低对单一分区的提交频率——增大导入攒批、合并高频小导入、减少并发写同一分区的作业数。另一类相关问题是单批事务过大（涉及 tablet/rowset 太多）：**未开启** lazy commit 时会直接返回 `TXN_BYTES_TOO_LARGE` 并附提示 "reduce the number of partitions involved in the load"（`cloud/src/meta-service/meta_service_txn.cpp:3336`，仅在非 lazy 回退分支追加）；开启 lazy commit（`enable_txn_lazy_commit`）则改走 `commit_txn_eventually`（`cloud/src/meta-service/meta_service_txn.cpp:2188`）分批提交。看到这条提示，方向就是减少单批涉及的分区/tablet 数。
 
 ---
 
-本章把第 3 章就绪的 rowset 真正点亮，走完了"一次导入的一生"里最后、也最容易被误解的一段。先从"多副本多 tablet 怎么同时可见"这个分布式读一致性问题出发，论证了 Doris 为什么选"版本号推进 + quorum 提交"而非每副本自可见或全局锁；再逐段走读了存算一体的两段式——`commitTransaction` 定版本写日志、`PublishVersionDaemon` 逐 BE 下发 publish 任务接版本链，重点挖了"卡在 COMMITTED"的三种真成因（副本宕机、`-235`、版本不连续/队头阻塞）和"积压深度 = committedVersion − visibleVersion"的观测法；接着以本章重点段拆解了存算分离如何把这两段折叠进 MetaService 的一次 FDB 事务、没有 per-BE publish、BE 靠 pull 兜 push 发现新版本，并逐点对照了两种模式的延迟构成、失败原子性与"卡住"表现，落在 FDB 乐观并发冲突重试这个分离模式独有的性能特征上。到这里，一批数据已经对查询可见，一次导入的主干链路就此闭环。但可见只是开始——随之而来的是版本越堆越多、小文件越来越碎，需要后台把它们合并整理，那是本部分后续 compaction 章节的主题。
+本章把第 3 章就绪的 rowset 真正点亮，走完了"一次导入的一生"里最后、也最容易被误解的一段。先从"多副本多 tablet 怎么同时可见"这个分布式读一致性问题出发，论证了 Doris 为什么选"版本号推进 + quorum 提交"而非每副本自可见或全局锁；再逐段走读了存算一体的两段式——`commitTransaction` 定版本写日志、`PublishVersionDaemon` 逐 BE 下发 publish 任务接版本链，重点挖了"卡在 COMMITTED"的真成因（副本宕机、版本不连续队头阻塞）以及一个常被误挂在 publish 头上的锅（`-235` 其实发生在写入 prepare 阶段），并给出"积压深度 = committedVersion − visibleVersion"的观测法；接着以本章重点段拆解了存算分离如何把这两段折叠进 MetaService 的一次 FDB 事务、没有 per-BE publish、BE 靠 pull 兜 push 发现新版本，并逐点对照了两种模式的延迟构成、失败原子性与"卡住"表现，落在 FDB 乐观并发冲突重试这个分离模式独有的性能特征上。到这里，一批数据已经对查询可见，一次导入的主干链路就此闭环。但可见只是开始——随之而来的是版本越堆越多、小文件越来越碎，需要后台把它们合并整理，那是本部分后续 compaction 章节的主题。
