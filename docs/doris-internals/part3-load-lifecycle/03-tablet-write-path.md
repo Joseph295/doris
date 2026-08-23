@@ -44,7 +44,7 @@ flowchart TD
 
 **MemTable 的内存组织与"聚合模型在内存先聚合"。** 这里有个常见误解要澄清。很多人以为 memtable 会对所有模型都在内存里做去重/预聚合——**并非如此**。`MemTable::need_agg()`（`be/src/load/memtable/memtable.cpp:735`）的逻辑是分模型的：
 
-- **Aggregate 模型（`AGG_KEYS`）**：会在内存里持续预聚合。`need_agg()` 对 `AGG_KEYS` 判断"自上次聚合以来又攒了 `write_buffer_size_for_agg`（默认 100MB，`be/src/common/config.cpp:753`）就再聚合一轮"，`MemTableWriter::write` 里据此调 `shrink_memtable_by_agg()`（`be/src/load/memtable/memtable_writer.cpp:137`）在 flush 前就把相同 key 的行聚合掉，减少落盘量。
+- **Aggregate 模型（`AGG_KEYS`）**：会在内存里持续预聚合。`need_agg()` 对 `AGG_KEYS` 判断"自上次聚合以来又攒了 `write_buffer_size_for_agg`（默认 100MB，`be/src/common/config.cpp:753`）就再聚合一轮"，`MemTableWriter::write` 里据此调 `shrink_memtable_by_agg()`（`be/src/load/memtable/memtable_writer.cpp:138`）在 flush 前就把相同 key 的行聚合掉，减少落盘量。
 - **Unique 模型 MoW（`UNIQUE_KEYS` 且开启 merge-on-write）**：flush 前会做一次按 key 的去重（`_aggregate` 相关逻辑，`be/src/load/memtable/memtable.cpp:762` 一带），保证一个 memtable 内相同主键只留最新一行。
 - **Duplicate 模型（`DUP_KEYS`）**：`need_agg()` 直接返回 false（`AGG_KEYS` 之外的分支），memtable 只是纯追加、不做任何合并——因为 Duplicate 语义就是"来多少存多少、不去重"。
 
@@ -62,9 +62,9 @@ flowchart TD
 
 当全局 memtable 内存越过 soft limit，limiter 会主动挑占用最大的若干 memtable 强制 flush（`_flush_active_memtables`）；越过 hard limit，`handle_memtable_flush`（在 `be/src/load/channel/load_channel_mgr.cpp:168` 与 v2 的 `be/src/exec/sink/writer/vtablet_writer_v2.cpp:596` 被调用）会**阻塞写入线程**直到内存降回安全线（`be/src/load/memtable/memtable_memory_limiter.cpp:181` 的 `while (_hard_limit_reached() && !_load_usage_low())` 循环）。这就是反压：不是某一张表慢，而是**全局 memtable 内存到顶了，所有导入一起被卡住等 flush 腾内存**。
 
-**错配会怎样？** 把 `load_process_max_memory_limit_percent` 调得过大（比如 90%），memtable 会挤占查询和其他子系统的内存，触发进程级 OOM 或 GC 抖动；调得过小，则 memtable 稍微多几个导入就撞水位、频繁反压，表现为"导入莫名其妙集体变慢、但 CPU/IO 都不满"。识别它的日志证据是关键：反压触发时会打 `reached memtable memory hard limit` / `... soft limit`（`be/src/load/memtable/memtable_memory_limiter.cpp:157` 与 `:259`），带上 `load mem` 当前值、`active/queue/flush` 三段内存明细。看到这行日志，就说明慢的根因是全局内存水位，而不是你正在调的那张表本身。
+**错配会怎样？** 把 `load_process_max_memory_limit_percent` 调得过大（比如 90%），memtable 会挤占查询和其他子系统的内存，触发进程级 OOM 或 GC 抖动；调得过小，则 memtable 稍微多几个导入就撞水位、频繁反压，表现为"导入莫名其妙集体变慢、但 CPU/IO 都不满"。识别它的日志证据是关键：强制 flush 的那条打的是 `reached memtable memory hard, ` / `reached memtable memory soft, `（`be/src/load/memtable/memtable_memory_limiter.cpp:157`），带上 `load mem` 当前值、`active/queue/flush` 三段内存明细；周期性刷新水位状态的那条（`be/src/load/memtable/memtable_memory_limiter.cpp:259`）措辞不同，打的是 `reached hard limit` / `reached soft limit`。两条都以 `reached` 开头，搜 `reached memtable memory` 能精确锁定前者。看到这行日志，就说明慢的根因是全局内存水位，而不是你正在调的那张表本身。
 
-**易错点二：flush 线程池打满时的堆积表现。** flush 线程池由 `MemTableFlushExecutor`（`class MemTableFlushExecutor`，`be/src/load/memtable/memtable_flush_executor.h`）持有，线程数由 `flush_thread_num_per_store`（默认 6，`be/src/common/config.cpp:848`）× store 数、并受 `max_flush_thread_num_per_cpu`（默认 4，`be/src/common/config.cpp:853`）封顶。这里还有个容易忽略的细节：executor 其实维护了**两个池**——普通池 `_flush_pool` 和高优先级池 `_high_prio_flush_pool`（`be/src/load/memtable/memtable_flush_executor.cpp:500` 与 `:507`，后者线程数走 `high_priority_flush_thread_num_per_store`）；若导入挂在某个 Workload Group 下，还会用该组独享的 `get_memtable_flush_pool()`（`be/src/load/memtable/memtable_flush_executor.cpp:231`）。分池的意义是让高优先级导入的 flush 不被普通导入排队饿死、并让 Workload Group 之间的 flush 资源相互隔离。**误配一个 Workload Group 的 flush 线程配额，只会拖慢那个组的导入，不会波及别的组**——排查时先确认这个导入落在哪个组、用的是哪个池，再看池是否打满。除此之外还有一道 per-writer 的闸：`DeltaWriter::write`（`be/src/load/delta_writer/delta_writer.cpp:166`）在写之前会检查 `_memtable_writer->flush_running_count() >= config::memtable_flush_running_count_limit`（默认 2，`be/src/common/config.cpp:756`），达到就 `sleep 10ms` 自旋等待。含义是：**单个 writer 最多允许 2 个 memtable 同时在飞（in-flight）地 flush**，再多就把写入线程压住。当磁盘 IO 跟不上、flush 变慢时，这个 running count 一直卡在上限，写入线程被反复 sleep——表现为"导入吞吐掉下来、`_wait_flush_limit_timer` 时间飙升"。如果盲目把 `memtable_flush_running_count_limit` 或 flush 线程数调大而磁盘本身是瓶颈，只会让更多 memtable 堆在内存里、把 3.2 那个全局 limiter 更快顶到水位——两个机制会连锁。排查时要分清：是 flush 线程池不够（调线程数有用），还是磁盘 IO 到顶（调线程数只会恶化内存压力）。
+**易错点二：flush 线程池打满时的堆积表现。** flush 线程池由 `MemTableFlushExecutor`（`class MemTableFlushExecutor`，`be/src/load/memtable/memtable_flush_executor.h`）持有，线程数由 `flush_thread_num_per_store`（默认 6，`be/src/common/config.cpp:848`）× store 数、并受 `max_flush_thread_num_per_cpu`（默认 4，`be/src/common/config.cpp:853`）封顶。这里还有个容易忽略的细节：executor 其实维护了**两个池**——普通池 `_flush_pool` 和高优先级池 `_high_prio_flush_pool`（`be/src/load/memtable/memtable_flush_executor.cpp:500` 与 `:507`，后者线程数走 `high_priority_flush_thread_num_per_store`）；若导入挂在某个 Workload Group 下，还会用该组独享的 `get_memtable_flush_pool()`（`be/src/load/memtable/memtable_flush_executor.cpp:231`）。分池的意义是让高优先级导入的 flush 不被普通导入排队饿死、并让 Workload Group 之间的 flush 资源相互隔离。**误配一个 Workload Group 的 flush 线程配额，只会拖慢那个组的导入，不会波及别的组**——排查时先确认这个导入落在哪个组、用的是哪个池，再看池是否打满。除此之外还有一道 per-writer 的闸：`DeltaWriter::write`（`be/src/load/delta_writer/delta_writer.cpp:170`）在写之前会检查 `_memtable_writer->flush_running_count() >= config::memtable_flush_running_count_limit`（默认 2，`be/src/common/config.cpp:756`），达到就 `sleep 10ms` 自旋等待。含义是：**单个 writer 最多允许 2 个 memtable 同时在飞（in-flight）地 flush**，再多就把写入线程压住。当磁盘 IO 跟不上、flush 变慢时，这个 running count 一直卡在上限，写入线程被反复 sleep——表现为"导入吞吐掉下来、`_wait_flush_limit_timer` 时间飙升"。如果盲目把 `memtable_flush_running_count_limit` 或 flush 线程数调大而磁盘本身是瓶颈，只会让更多 memtable 堆在内存里、把 3.2 那个全局 limiter 更快顶到水位——两个机制会连锁。排查时要分清：是 flush 线程池不够（调线程数有用），还是磁盘 IO 到顶（调线程数只会恶化内存压力）。
 
 ## 3.3 源码走读：主键模型的 Delete Bitmap
 
@@ -83,7 +83,7 @@ flowchart TD
 
 **tricky 点：bitmap 依赖的"可见版本集合"与并发导入的相互影响。** 算 bitmap 本质是"拿本批新数据的主键，去所有可见历史 rowset 里查这些 key 落在哪些旧行上，把旧行标删"。可见历史 rowset 的集合，取决于 `get_all_rs_id` 拿到的那一刻的版本快照（`be/src/storage/tablet/base_tablet.cpp:275` 一带）。现在设想两个导入 A、B 并发写同一个 tablet：A 在写入阶段预算 bitmap 时，B 的 rowset 还没 publish、对 A 不可见，所以 A 的第一阶段算不到 B；等 A 到 publish 阶段，B 可能已经先 publish 了、变成了新的可见版本——于是 A 必须在第二阶段**重新对包含 B 在内的最新版本集合**补算，才能保证"A 覆盖了 B 也覆盖的那些主键"这件事被正确裁决。第一阶段只是预热，第二阶段才是以最终版本序为准的定论。**理解这一点，才能理解为什么并发写同一主键 tablet 时，publish 阶段的 bitmap 计算会变重、甚至相互等待**（cloud 模式还要抢分布式锁，见 3.4）。
 
-**易错点：主键表大批量随机 upsert 的写放大来源。** 主键表导入越写越慢、CPU 高，最常见的根因是 delete bitmap 的写放大，来源有三处叠加：其一，每批新数据都要拿主键去历史 rowset 里**查点**（point lookup）定位旧行，历史 rowset 越多、query 越随机（key 分布越散），命中的 segment 越多、查得越慢；其二，Partial Update（部分列更新）为了补全整行，计算 bitmap 时要**回读旧行的其余列**（`be/src/storage/rowset_builder.cpp:344` 附近的注释明说这步 resource-intensive，所以刻意跳过重复计算），随机 upsert 场景下这是实打实的随机读；其三，bitmap 本身随版本增长，publish 时要 merge 的历史 bitmap 也在变大。**所以主键表最忌"大批量、主键随机分布、还叠加 partial update"**——三者一起会把写入侧的点查和回读放大到离谱。缓解方向是让主键有序/聚集、控制单批规模、以及给主键表配好 compaction（把历史 rowset 压少，点查的目标就少）。这也解释了为什么 3.2 那些 flush 慢的表征，在主键表上往往还叠加一层 bitmap 计算慢——排查时要把这两层分开看。
+**易错点：主键表大批量随机 upsert 的写放大来源。** 主键表导入越写越慢、CPU 高，最常见的根因是 delete bitmap 的写放大，来源有三处叠加：其一，每批新数据都要拿主键去历史 rowset 里**查点**（point lookup）定位旧行，历史 rowset 越多、query 越随机（key 分布越散），命中的 segment 越多、查得越慢；其二，Partial Update（部分列更新）为了补全整行，计算 bitmap 时要**回读旧行的其余列**（`be/src/storage/rowset_builder.cpp:341` 附近的注释明说这步 resource-intensive，所以刻意跳过重复计算），随机 upsert 场景下这是实打实的随机读；其三，bitmap 本身随版本增长，publish 时要 merge 的历史 bitmap 也在变大。**所以主键表最忌"大批量、主键随机分布、还叠加 partial update"**——三者一起会把写入侧的点查和回读放大到离谱。缓解方向是让主键有序/聚集、控制单批规模、以及给主键表配好 compaction（把历史 rowset 压少，点查的目标就少）。这也解释了为什么 3.2 那些 flush 慢的表征，在主键表上往往还叠加一层 bitmap 计算慢——排查时要把这两层分开看。
 
 ## 3.4 双模式对比
 
@@ -121,17 +121,15 @@ flowchart TD
 
 **目标**：亲手把 3.2 的全局 limiter 顶到水位，看到"不是某张表慢、而是所有导入一起被反压"的日志证据。
 
-1. 把全局闸门调低，让水位更容易撞到（也是 mutable 配置）：
-   ```bash
-   curl -X POST -u root: "http://<be_host>:8040/api/update_config?load_process_max_memory_limit_percent=10"
-   ```
-   （把导入可用内存压到进程的 10%，制造紧张。实验后务必调回默认 50。）
-2. **同时**发起多个大并发 Stream Load（比如开十几个 `curl` 并行灌大文件到不同表/不同 tablet），让全局 memtable 内存快速累积。
-3. **看日志**：在 `be.INFO` 里搜 `reached memtable memory`——会看到 `reached memtable memory soft limit` 或 `hard limit`，后面跟着 `load mem: ...`、`active/queue/flush` 三段内存明细（`be/src/load/memtable/memtable_memory_limiter.cpp:157`/`:259`）。看到这行，就说明 limiter 正在强制 flush 甚至阻塞写入。
-4. **观察现象**：这时所有并发导入的吞吐会一起掉下来，即便单张表的数据量并不大——因为它们共享同一个全局内存池，池满了大家一起等 flush 腾地方。
-5. 把 `load_process_max_memory_limit_percent` 调回 50，重复并发导入，反压日志消失、吞吐恢复。
+**先破一个想当然的坑**：想调低水位，第一反应往往是 `curl .../api/update_config?load_process_max_memory_limit_percent=...` 动态改——**这条路走不通**。`load_process_max_memory_limit_percent` 在 `be/src/common/config.cpp:761` 是用 `DEFINE_Int32` 定义的（不是 `DEFINE_mInt32`），`/api/update_config` 只接受带 `m` 前缀的 mutable 配置，改它会被直接拒掉；soft（`:768`）、safe（`:772`）同理都是不可变的。这本身就是一条认知：**这三条水位线是"启动即定"的容量规划参数，不是运行时旋钮**——它们决定了这台 BE 把多少内存划给导入，属于开机时就该拍板的事。所以要压低水位只能改 `be.conf` 后重启 BE：
 
-**要建立的认知**：导入"集体变慢"和"某张表慢"是两码事。前者的指纹是 `reached memtable memory ... limit` 日志——根因在全局内存水位，调单张表的参数没用，得从"降低 memtable 总占用（减小 `write_buffer_size` 或并发）/加快 flush（够不够线程、磁盘到没到顶）/放宽水位（谨慎，会挤查询内存）"三个方向下手。这一步踩过，3.6 排查清单里"MEM_LIMIT_EXCEEDED / 导入集体变慢"那条就有了肌肉记忆。
+1. 在 `be.conf` 里加一行 `load_process_max_memory_limit_percent=5`（把导入可用内存压到进程的 5%，制造紧张），重启这台 BE 使其生效。**为什么要压这么低？** 因为在一台大内存机器上，默认 50% 的水位用手工发几个导入几乎撞不到——这个"撞不到"恰恰是要建立的直觉：这道全局闸门是为**多租户、高并发的生产压力**准备的，单机手搓很难触发；反过来说，一旦你在生产日志里真看到它，那就是货真价实的全局内存告急信号，不是噪声。
+2. 重启后，**同时**发起多个大并发 Stream Load（比如开十几个 `curl` 并行灌大文件到不同表/不同 tablet），让全局 memtable 内存快速累积、越过被压低到 5% 的水位。
+3. **看日志**：在 `be.INFO` 里搜 `reached memtable memory`——命中的是强制 flush 那条，形如 `reached memtable memory hard, ...` 或 `reached memtable memory soft, ...`，后面跟着 `load mem: ...`、`active/queue/flush` 三段内存明细（`be/src/load/memtable/memtable_memory_limiter.cpp:157`）；另外还会周期性打 `reached hard limit` / `reached soft limit`（`be/src/load/memtable/memtable_memory_limiter.cpp:259`）。看到它们，就说明 limiter 正在强制 flush 甚至阻塞写入。
+4. **观察现象**：这时所有并发导入的吞吐会一起掉下来，即便单张表的数据量并不大——因为它们共享同一个全局内存池，池满了大家一起等 flush 腾地方。
+5. 把 `be.conf` 里那行 `load_process_max_memory_limit_percent` 删掉（或调回 50）、重启 BE，重复并发导入，反压日志消失、吞吐恢复。
+
+**要建立的认知**：导入"集体变慢"和"某张表慢"是两码事。前者的指纹是 `reached memtable memory` 日志——根因在全局内存水位，调单张表的参数没用，得从"降低 memtable 总占用（减小 `write_buffer_size` 或并发）/加快 flush（够不够线程、磁盘到没到顶）/抬高水位（改 `be.conf` 重启，谨慎，会挤查询内存）"三个方向下手。顺带记住：水位百分比是重启才生效的容量参数，别指望在线热调。这一步踩过，3.6 排查清单里"MEM_LIMIT_EXCEEDED / 导入集体变慢"那条就有了肌肉记忆。
 
 ## 3.6 排查清单
 
@@ -139,7 +137,7 @@ flowchart TD
 
 ### 症状 A：导入慢——先分清 sink 慢 / flush 慢 / bitmap 慢
 
-- **第一刀：是送不进来，还是写不下去？** sink 侧慢（分桶、网络、下游反压）属于第 2 章的链路；本章的"写不下去"从 `DeltaWriter` 之后算起。看协调 BE 的 profile 里 `_wait_flush_limit_timer`——如果这个等待时间高，说明卡在**单 writer 的 flush in-flight 上限**（`memtable_flush_running_count_limit`，默认 2，`be/src/load/delta_writer/delta_writer.cpp:166`），即 flush 追不上写入。
+- **第一刀：是送不进来，还是写不下去？** sink 侧慢（分桶、网络、下游反压）属于第 2 章的链路；本章的"写不下去"从 `DeltaWriter` 之后算起。看协调 BE 的 profile 里 `_wait_flush_limit_timer`——如果这个等待时间高，说明卡在**单 writer 的 flush in-flight 上限**（`memtable_flush_running_count_limit`，默认 2，`be/src/load/delta_writer/delta_writer.cpp:170`），即 flush 追不上写入。
 - **flush 追不上：是线程不够还是磁盘到顶？** 查 flush 线程池是否打满、磁盘 IO util 是否接近 100%。磁盘到顶时调大 `flush_thread_num_per_store`（`be/src/common/config.cpp:848`）或 `memtable_flush_running_count_limit` **只会恶化**——更多 memtable 堆内存，把全局 limiter 更快顶到水位。磁盘没到顶、纯粹线程少，才是调线程数的场景。
 - **主键表额外一层：bitmap 计算慢。** MoW 表还要看 delete bitmap 的耗时（profile 里 `_submit_delete_bitmap_timer` / `_wait_delete_bitmap_timer`，`be/src/storage/rowset_builder.cpp` 一带）。这层慢的根因见症状 B。
 
@@ -152,9 +150,9 @@ flowchart TD
 
 ### 症状 C：`MEM_LIMIT_EXCEEDED` / 导入集体变慢的读法
 
-- **指纹日志**：BE `be.INFO` 里搜 `reached memtable memory soft limit` / `hard limit`（`be/src/load/memtable/memtable_memory_limiter.cpp:157`/`:259`）。看到它，说明是**全局 memtable 内存水位**在反压，不是单张表的问题——调那张表的参数无效。
+- **指纹日志**：BE `be.INFO` 里搜 `reached memtable memory`——强制 flush 那条打的是 `reached memtable memory hard, ` / `reached memtable memory soft, `（`be/src/load/memtable/memtable_memory_limiter.cpp:157`），周期刷新那条打的是 `reached hard limit` / `reached soft limit`（`be/src/load/memtable/memtable_memory_limiter.cpp:259`）。看到它们，说明是**全局 memtable 内存水位**在反压，不是单张表的问题——调那张表的参数无效。
 - **读懂那行日志的三段内存**：`active`（正在写的 memtable）、`queue`（已冻结待 flush 的）、`flush`（正在刷盘的）。如果 `queue` 长期很大，说明 flush 消费不掉、堆在队列里——回到症状 A 查 flush 侧。
-- **三个下手方向**：降总占用（减 `write_buffer_size` 或并发）、加快 flush（线程/磁盘）、放宽水位（`load_process_max_memory_limit_percent`，谨慎，会挤占查询内存触发别处 OOM）。默认 50% 是导入与查询内存的平衡点，动它之前先确认瓶颈真在 memtable 而非别处。
+- **三个下手方向**：降总占用（减 `write_buffer_size` 或并发，前者是 mutable、可热调）、加快 flush（线程/磁盘）、抬高水位（`load_process_max_memory_limit_percent` 是 `DEFINE_Int32` 不可热调，须改 `be.conf` 重启，且谨慎——会挤占查询内存触发别处 OOM）。默认 50% 是导入与查询内存的平衡点，动它之前先确认瓶颈真在 memtable 而非别处。
 
 ---
 
