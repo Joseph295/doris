@@ -49,7 +49,7 @@ flowchart TD
 |---|---|---|
 | 第一部分：全局架构与设计哲学 | 建立 FE / BE / MetaService 的职责边界与存算一体、存算分离两种形态的全局心智模型 | 已完成 |
 | 第二部分：一条查询 SQL 的一生 | 从 MySQL 协议接入到 Profile 精读，走完一次查询的完整执行路径 | 已完成 |
-| 第三部分：一次导入的一生 | 从事务模型到 Compaction，走完一次写入的完整生命周期 | 规划中 |
+| 第三部分：一次导入的一生 | 从事务模型到 Compaction，走完一次写入的完整生命周期 | 已完成 |
 | 第四部分：元数据与 FE 内核 | Catalog 体系、持久化、高可用与存算分离元数据服务的内部机制 | 规划中 |
 | 第五部分：存储引擎深潜 | Rowset/Segment 文件格式、索引体系、读路径与主键模型内核 | 规划中 |
 | 第六部分：集群运维与故障排查 | 从症状到根因的系统化故障定位方法论 | 规划中 |
@@ -75,16 +75,16 @@ flowchart TD
 8. [Join / 聚合 / 排序算子与 Runtime Filter、Spill](part2-query-lifecycle/08-operators-rf-spill.md)——核心算子与 Runtime Filter、Spill
 9. [结果回传与 Profile 精读](part2-query-lifecycle/09-result-and-profile.md)——从 Profile 反推执行瓶颈
 
+### 第三部分：一次导入的一生（已完成）
+
+1. [导入方式总览与事务模型](part3-load-lifecycle/01-load-overview-and-txn.md)——2PC、Label 机制、事务状态机
+2. [Stream Load 全路径](part3-load-lifecycle/02-stream-load-path.md)——HTTP 接入→计划→Sink→MemTable→Flush
+3. [Tablet 写入细节](part3-load-lifecycle/03-tablet-write-path.md)——MemTable、Segment 生成、主键模型 Delete Bitmap
+4. [事务提交与可见性](part3-load-lifecycle/04-commit-and-visibility.md)——存算一体 Publish Version vs 存算分离 MetaService 提交
+5. [其他导入方式](part3-load-lifecycle/05-other-load-paths.md)——Broker/Routine/Insert Into/Group Commit 的路径差异
+6. [Compaction](part3-load-lifecycle/06-compaction.md)——为什么需要、调度策略、两种模式下的执行位置
+
 以下部分的章节规划摘自设计文档第 6 节，写作过程中如有增删会回到设计文档同步更新。
-
-### 第三部分：一次导入的一生（规划中）
-
-1. 导入方式总览与事务模型：2PC、Label 机制、事务状态机
-2. Stream Load 全路径：HTTP 接入→计划→Sink→MemTable→Flush
-3. Tablet 写入细节：MemTable、Segment 生成、主键模型 Delete Bitmap
-4. 事务提交与可见性：存算一体 Publish Version vs 存算分离 MetaService 提交
-5. 其他导入方式：Broker/Routine/Insert Into 的路径差异
-6. Compaction：为什么需要、调度策略、两种模式下的执行位置
 
 ### 第四部分：元数据与 FE 内核（规划中）
 

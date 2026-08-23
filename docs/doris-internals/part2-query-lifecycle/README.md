@@ -16,4 +16,4 @@
 
 读完这九章，你应当能画出一条查询从连接到结果的端到端路径，判断任意一段执行代码在哪种模式下生效，并能读一份慢查询 Profile 反推瓶颈——这套 Profile 精读方法是第六部分查询故障排查的直接基础。
 
-**下一部分预告**：第三部分《一次导入的一生》——从事务模型与 Label 机制，沿 Stream Load 的 HTTP 接入 → 计划 → Sink → MemTable → Flush 走完一次写入的完整生命周期，直到 Compaction。规划详见[系列总目录](../README.md)。
+**下一部分预告**：[第三部分《一次导入的一生》](../part3-load-lifecycle/README.md)——从事务模型与 Label 机制，沿 Stream Load 的 HTTP 接入 → 计划 → Sink → MemTable → Flush 走完一次写入的完整生命周期，直到 Compaction。
