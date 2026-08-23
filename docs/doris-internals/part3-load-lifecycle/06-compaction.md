@@ -60,10 +60,12 @@ cumulative point 是 Tablet 上的一个版本号游标，它把所有 rowset �
 它怎么右移？看 `SizeBasedCumulativeCompactionPolicy::update_cumulative_point`（`be/src/storage/compaction/cumulative_compaction_policy.cpp:142`）——每次 cumulative compaction 成功后被调用：
 
 ```cpp
+// ...（省略 delete 版本快速推进与状态保护分支）
 size_t total_size = output_rowset->rowset_meta()->total_disk_size();
 if (total_size >= tablet->cumulative_promotion_size()) {
     tablet->set_cumulative_layer_point(output_rowset->end_version() + 1);
 }
+// ...（省略 delete 版本快速推进与状态保护分支）
 ```
 
 关键在"晋升（promotion）"这个语义：cumulative 合出来的新 rowset，**只有体量攒够了 `cumulative_promotion_size`，point 才越过它、把它"下放"到 base 域**（`be/src/storage/compaction/cumulative_compaction_policy.cpp:155-157`）。没攒够就把 point 留在原地，让这个中等 rowset 继续参与后续 cumulative 合并、继续长大。promotion size 是按 base rowset 大小乘一个比例算出来的、夹在上下限之间的动态值（`_calc_promotion_size`，`:122-135`）。这就实现了"分层"：小 rowset 在 cumulative 域里反复合、越合越大，够大了才沉底进 base 域，等着某天被 base compaction 收编。
@@ -129,7 +131,7 @@ MoW 表还多一步。第 3 章埋过的 delete bitmap（标记哪些 key 被后
 
 **一体模式**里，一个 tablet 只属于一个 BE，那台 BE 独占它的磁盘和元数据，compaction 是纯本地行为——生产者线程挑中、本地线程池执行、本地 `modify_rowsets` 替换，全程无需跟任何外部组件协调。6.2、6.3 讲的就是这条路径。
 
-**分离模式**里，tablet 的数据在共享对象存储上，一个计算组内**多个 BE 都可能看到并想合并同一个 tablet**。若不加协调，两台 BE 同时合 `[5-7]`、各自写一份输出、各自去改 MetaService 的元数据，就会重复劳动甚至元数据打架。解法是**把"我要合这个 tablet 的这段版本"这件事，做成 MetaService 上的一把分布式锁**——这正是 part1 2.4 埋下的 tablet job lock 伏笔的回收点。
+**分离模式**里，tablet 的数据在共享对象存储上，一个计算组内**多个 BE 都可能看到并想合并同一个 tablet**。若不加协调，两台 BE 同时合 `[5-7]`、各自写一份输出、各自去改 MetaService 的元数据，就会重复劳动甚至元数据打架。解法是**把"我要合这个 tablet 的这段版本"这件事，做成 MetaService 上的一把分布式锁**——tablet job lock（MetaService 的进程结构见 [part1 第 2 章](../part1-architecture/02-three-components.md) 2.4）。
 
 云端 compaction 类是 `CloudCumulativeCompaction`（`be/src/cloud/cloud_cumulative_compaction.h:30`）、`CloudBaseCompaction`（`be/src/cloud/cloud_base_compaction.h:30`）、`CloudFullCompaction`（`be/src/cloud/cloud_full_compaction.h:30`），共用基类 `CloudCompactionMixin`（`be/src/storage/compaction/compaction.h:238`）。它们执行前先抢锁。
 

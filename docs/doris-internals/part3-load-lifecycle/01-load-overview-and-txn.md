@@ -13,12 +13,12 @@
 **有哪些候选、各有什么优劣？**
 
 - **候选一：无事务、尽力而为地写。** 客户端把数据推给 BE，BE 写哪算哪，谁写成功谁可见。实现最简单、吞吐也高。但代价是致命的：部分副本写成功、部分失败时，查询会读到残缺的一批数据；客户端超时重试会造成重复写入，分析结果直接错。对一个要给报表和决策供数的分析库来说，这种"脏读 + 重复"是不可接受的。
-- **候选二：每行独立幂等（按主键去重）。** 给每行数据一个唯一键，写入时按键覆盖，重复写同一行是幂等的。这确实能解决重复问题，但它把幂等的粒度压到了"行"级：每写一行都要查一次是否已存在、要维护每行的版本，写放大和元数据开销巨大。分析型导入动辄百万行一批，逐行幂等对吞吐极不友好——这套思路更适合 OLTP 的点写，不适合 OLAP 的批量灌入。（Doris 主键模型的 Delete Bitmap 是在**批**的粒度上做行级去重，和这里说的"每行独立走一遍幂等协议"完全是两码事，详见 part3 后续主键模型章节。）
+- **候选二：每行独立幂等（按主键去重）。** 给每行数据一个唯一键，写入时按键覆盖，重复写同一行是幂等的。这确实能解决重复问题，但它把幂等的粒度压到了"行"级：每写一行都要查一次是否已存在、要维护每行的版本，写放大和元数据开销巨大。分析型导入动辄百万行一批，逐行幂等对吞吐极不友好——这套思路更适合 OLTP 的点写，不适合 OLAP 的批量灌入。（Doris 主键模型的 Delete Bitmap 是在**批**的粒度上做行级去重，和这里说的"每行独立走一遍幂等协议"完全是两码事，详见第 3 章 3.3，内核级深潜见 part5 主键模型章节。）
 - **候选三：批级事务 + Label 幂等 + 两阶段提交。** 把"一批导入"整体当成一个事务：开始时分配一个事务 ID 和一个用户可指定的**标签（Label）**，这一批的所有 tablet 写入都挂在这个事务下；只有当足够多的副本都写成功、事务提交并 publish 后，这批数据才**整体**变得可见；任何一步失败，整个事务回滚，一行都不进。幂等性靠 Label 保证：同一个 Label 在库内唯一，重复用一个已成功的 Label 提交会被直接挡回。
 
 **Label 机制为什么能挡重复提交？** 关键在 FE 把 `label -> txn ids` 的映射常驻内存并持久化（`fe/fe-core/src/main/java/org/apache/doris/transaction/DatabaseTransactionMgr.java:154` 的 `labelToTxnIds`）。开事务时先查这个 Label 有没有对应的"未 ABORTED"事务：有且不是本次重试请求，就抛 `LabelAlreadyUsedException` 挡回去。于是客户端只要对同一批数据用同一个 Label（比如用业务批次号当 Label），无论超时重试多少次，成功的那批也只会进一次——幂等的判断从"逐行比对"上移到了"一个 Label 一次事务"，代价只是维护一张 Label 表，而不是给每行加版本。这就是把幂等做在**批级**而非**行级**的杠杆所在。
 
-**Doris 怎么考量和解决的？** Doris 选了候选三，并把它作为**所有**导入方式共同的地基——无论 Stream Load、Broker Load 还是 Insert Into，最终都落到同一套 `beginTransaction / commit / publish / abort` 上。这么选的收益是：批级事务天然契合 OLAP"大批量、低频次"的写入模式，幂等开销被摊薄到可忽略；两阶段提交（commit 与 publish 分离）让"多副本达成一致"和"数据对外可见"解耦，提交只要多数副本 ACK 就能返回、可见性交给后台异步 publish 推进。代价也要认清：**commit 成功不等于查得到**——commit 和 publish/visible 之间有一个时间窗口，这正是 part2 第 9 章从查询侧提过的"导入成功但查不到"的根源，1.3 会把这两个时间点的语义讲透。理解了"批级事务 + Label + 两阶段"这三件套，后面所有导入方式的行为就都能顺着这条主线推出来。
+**Doris 怎么考量和解决的？** Doris 选了候选三，并把它作为**所有**导入方式共同的地基——无论 Stream Load、Broker Load 还是 Insert Into，最终都落到同一套 `beginTransaction / commit / publish / abort` 上。这么选的收益是：批级事务天然契合 OLAP"大批量、低频次"的写入模式，幂等开销被摊薄到可忽略；两阶段提交（commit 与 publish 分离）让"多副本达成一致"和"数据对外可见"解耦，提交只要多数副本 ACK 就能返回、可见性交给后台异步 publish 推进。代价也要认清：**commit 成功不等于查得到**——commit 和 publish/visible 之间有一个时间窗口，这正是运维中常被提及的"导入成功但查不到"现象的根源——1.3 与第 4 章会把这两个时间点的语义讲透。理解了"批级事务 + Label + 两阶段"这三件套，后面所有导入方式的行为就都能顺着这条主线推出来。
 
 ## 1.2 导入方式全景
 
@@ -35,7 +35,7 @@ Doris 对外提供五种主要导入方式，它们的触发方、数据源、�
 几点要点：
 
 - **同步 vs 异步不是"快慢"，而是"谁负责轮询结果"。** Stream Load、Insert Into 是同步的——发起方阻塞等最终成败；Broker Load 是异步的——提交即返回一个作业，成败靠 `SHOW LOAD` 轮询；Routine Load 更特殊，它是一个**常驻作业**，FE 周期性地把它拆成一个个子任务、每个子任务对应一次独立的批级事务。
-- **Group Commit 是"事务合并"而非新事务模型。** 高并发小写入会产生海量小事务，每个都要走一遍 begin/commit/publish，FE 事务表和 BE 版本数都会被打爆（还记得 part2 提过的 `-235 TOO_MANY_VERSION` 吗）。Group Commit 让服务端把短时间内的多次写入攒成一批、共用一次提交，用"牺牲一点可见延迟"换"事务/版本数量级下降"。它仍然是本章那套事务的应用，只是提交粒度变粗了。
+- **Group Commit 是"事务合并"而非新事务模型。** 高并发小写入会产生海量小事务，每个都要走一遍 begin/commit/publish，FE 事务表和 BE 版本数都会被打爆（还记得 [part1 第 3 章](../part1-architecture/03-data-model.md) 排查清单提过的 `-235 TOO_MANY_VERSION` 吗）。Group Commit 让服务端把短时间内的多次写入攒成一批、共用一次提交，用"牺牲一点可见延迟"换"事务/版本数量级下降"。它仍然是本章那套事务的应用，只是提交粒度变粗了。
 - 本章不展开任何一种的执行细节。Stream Load 的完整链路（HTTP 入口 → memtable → delta writer → rowset → publish）是本部分主线，从第 2 章开始逐环拆；Broker Load / Routine Load / Group Commit 的差异在各自专章交代（详见 part3 后续章节）。这里只要建立"五种入口、一套地基"的分类心智即可。
 
 ## 1.3 源码走读：事务状态机
@@ -78,7 +78,7 @@ stateDiagram-v2
 
 这是整章最容易误解、也最需要讲透的一点。`COMMITTED` 的含义是**这批数据已经在足够多的副本上落盘、事务的成败已经定了**——它绝不会再回滚（状态机里 COMMITTED 没有指向 ABORTED 的边）。但 `COMMITTED` 的数据**还查不到**：要等 `PublishVersionDaemon` 给每个 tablet 下发 publish、把这批数据对应的版本"接上"tablet 的版本链、状态推进到 `VISIBLE`，查询才会带上这个新版本。
 
-为什么要把"提交"和"可见"拆成两步？因为多副本一致性和对外可见性是两件事：commit 只需要多数副本确认收到数据就能对客户端返回成功（低延迟）；而让所有副本的版本链都对齐、让查询能一致地读到，是一个可以异步推进的过程。拆开之后，导入的返回延迟不被 publish 拖累，publish 可以批量、可重试。**这个窗口就是 part2 第 9 章那个"导入返回成功了、可 `SELECT` 却查不到刚写的数据"现象的来源**——在存算一体下，publish 落到 `be/src/storage/task/engine_publish_version_task.cpp`（详见 part3 后续 publish 章节）。
+为什么要把"提交"和"可见"拆成两步？因为多副本一致性和对外可见性是两件事：commit 只需要多数副本确认收到数据就能对客户端返回成功（低延迟）；而让所有副本的版本链都对齐、让查询能一致地读到，是一个可以异步推进的过程。拆开之后，导入的返回延迟不被 publish 拖累，publish 可以批量、可重试。**这个窗口就是运维中常见的"导入返回成功了、可 `SELECT` 却查不到刚写的数据"现象的来源**——在存算一体下，publish 落到 `be/src/storage/task/engine_publish_version_task.cpp`（详见 part3 后续 publish 章节）。
 
 这也是为什么同步导入（Stream Load / Insert Into）默认会在返回前**等到 `VISIBLE`**：它们要给客户端一个"发完就能查到"的承诺，所以宁可在 FE 侧多等一会儿 publish。而异步导入（Broker Load）返回的只是"作业已受理"，可见性靠后续轮询确认——两类导入对这个窗口的处理策略不同，根源都在"commit 与 visible 是两个语义时刻"。
 
@@ -171,7 +171,7 @@ part1 第 4 章 4.4 节已经确认过一个关键事实：`GlobalTransactionMgr
 
 - **先分清停在哪个态**：`SHOW TRANSACTION ... WHERE label='...'` 看 `TransactionStatus`。若为 `COMMITTED`（有 `CommitTime` 无 `PublishTime`），说明事务已提交、卡在 publish；这不是"导入失败"，也不能 abort（COMMITTED 只进不退），要往 publish 侧查。
 - **publish 卡住的常见根因**：某些副本不可达 / 落后太多导致版本无法在多数副本上对齐；或后台 publish 线程 `PublishVersionDaemon`（`fe/fe-core/src/main/java/org/apache/doris/transaction/PublishVersionDaemon.java:60`）积压。存算一体下 publish 任务落到 BE 的 `be/src/storage/task/engine_publish_version_task.cpp`，可结合 BE 日志看具体 tablet 的 publish 报错。
-- **和"查不到"区分**：如果事务已经是 `VISIBLE` 但查询仍看不到，那是查询侧读版本的问题（见 part2 第 9 章），不是事务没推进——两者定位入口完全不同。
+- **和"查不到"区分**：如果事务已经是 `VISIBLE` 但查询仍看不到，那是查询侧读版本的问题（见 [part2 第 7 章](../part2-query-lifecycle/07-scan-path.md) 或 part1 3.3 版本机制），不是事务没推进——两者定位入口完全不同。
 
 ### 症状 B：`Label Already Used` 误判
 

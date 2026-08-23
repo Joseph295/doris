@@ -217,7 +217,8 @@ Stream Load 的**接入方式与计划结构在两种模式下完全一致**：�
 ### 症状 C：卡在数据传输 vs 卡在开事务/要计划
 
 - **先判断卡在链路哪一段**：看协调 BE 日志。只有 `new income streaming load request`、迟迟没有 `begin to execute stream load`，多半卡在**开事务或要计划**这两次到 FE 的 thrift（`begin_txn`/`streamLoadPut`）——查 FE 是否在忙、事务是否触达配额（上一章症状 C 的 `current running txns` 限制）。
-- **已经 `begin to execute` 但长时间不返回**：卡在**数据传输/写入**阶段。常见是下游 BE 反压——`VNodeChannel` 发出的数据在目标 BE 侧攒不动，典型根因是目标 tablet 版本过多触发 `-235 TOO_MANY_VERSION`（part2 已证：`be/src/common/status.h`，与 `max_tablet_version_num` 相关，`be/src/common/config.cpp`）。这属于 `DeltaWriter` 之后的写入/compaction 侧问题，顺着第 3 章及后续 compaction 章节查。
+- **已经 `begin to execute` 但长时间不返回**：卡在**数据传输/写入**阶段，多半是下游写入反压——`VNodeChannel` 发出的数据在目标 BE 侧攒不动，典型根因是 memtable limiter / flush 堆积把写入拖住（详见第 3 章）。这是"卡住、迟迟不返回"一类。
+- **反而是秒级快速报错**：则多半是目标 tablet 版本过多，写入 prepare 阶段直接触发 `-235 TOO_MANY_VERSION`（[part1 第 3 章](../part1-architecture/03-data-model.md) 排查清单已证：`be/src/common/status.h`，与 `max_tablet_version_num` 相关，`be/src/common/config.cpp`）——这不是"卡住"而是**快速失败**，根因和缓解见第 6 章 compaction。
 - **超大 body 秒失败**：报 `body size ... exceed BE's conf` 是 header 阶段的体量检查（`be/src/service/http/action/stream_load.cpp:332`/`:340`），CSV 调 `streaming_load_max_mb`、JSON 调 `streaming_load_json_max_mb`（或开 `read_json_by_line` 分行读）。
 
 ---

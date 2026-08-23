@@ -1,6 +1,6 @@
 # 第 3 章：Tablet 写入细节 —— MemTable、Flush 与 Delete Bitmap
 
-上一章把一批数据从 HTTP 流一路送到了目标 BE 的 `DeltaWriter` 门口：`OlapTableSink` 按分桶把行分发到各 tablet 副本所在的 BE，`LoadChannel` / `TabletsChannel` 为每个 tablet 准备好了一个 `DeltaWriter`。本章从 `DeltaWriter` 接手，回答一个具体的问题：这批数据到了单个 tablet 上，怎么在内存里攒、怎么变成磁盘上一个个列存 Segment 文件、主键表又是在什么时候算出"哪些旧行被这批新数据顶替了"。链路的终点是"一个 rowset 就绪、等待提交"——提交与 publish 是第 4 章的territory，本章在 rowset 落地、delete bitmap 预算完成的那一刻收手。
+上一章把一批数据从 HTTP 流一路送到了目标 BE 的 `DeltaWriter` 门口：`OlapTableSink` 按分桶把行分发到各 tablet 副本所在的 BE，`LoadChannel` / `TabletsChannel` 为每个 tablet 准备好了一个 `DeltaWriter`。本章从 `DeltaWriter` 接手，回答一个具体的问题：这批数据到了单个 tablet 上，怎么在内存里攒、怎么变成磁盘上一个个列存 Segment 文件、主键表又是在什么时候算出"哪些旧行被这批新数据顶替了"。链路的终点是"一个 rowset 就绪、等待提交"——提交与 publish 是第 4 章的主题，本章在 rowset 落地、delete bitmap 预算完成的那一刻收手。
 
 为什么这一段值得单独拆一章？因为它是导入链路上"慢"最容易发生、也最容易误判的一段。用户抱怨"导入变慢了"，根因八成落在本章讲的三个地方之一：memtable flush 跟不上、全局内存水位反压、主键表 delete bitmap 写放大。把 memtable→flush→segment 这条主干和 delete bitmap 这条支线讲清楚，后面排查才有坐标系。
 
@@ -12,7 +12,7 @@
 
 **有哪些候选、各有什么优劣？**
 
-- **候选一：来一批写一个文件。** 实现最简单，写入零延迟。但直接踩中列存的死穴——小文件爆炸。每个文件都得单独记元数据、单独被查询打开，version 数会疯涨（part2 已见识过 `-235 TOO_MANY_VERSION` 的威力）。这条路等于把攒批的责任甩给了 compaction，让后台永远追不上。
+- **候选一：来一批写一个文件。** 实现最简单，写入零延迟。但直接踩中列存的死穴——小文件爆炸。每个文件都得单独记元数据、单独被查询打开，version 数会疯涨（[part1 第 3 章](../part1-architecture/03-data-model.md) 排查清单已见识过 `-235 TOO_MANY_VERSION` 的威力）。这条路等于把攒批的责任甩给了 compaction，让后台永远追不上。
 - **候选二：直接改写已有的列文件（in-place update）。** 让新数据就地追加或修改到现存的列文件里，避免产生新文件。这在行存里可行，但在列存里代价不可接受：列文件是编码压缩、块对齐的整体，改一行意味着解压整个块、重排、重新编码、重写——写放大是灾难性的，而且破坏了列文件"只读、不可变"这个让并发查询无锁的关键前提。
 - **候选三：WAL + 内存表攒批（LSM 经典）。** 像 RocksDB 那样：写入先落一条 WAL 保证持久性，同时进内存的 MemTable 攒着；MemTable 攒满了再一次性 flush 成一个不可变的有序文件（SSTable）。攒批解决了小文件问题，WAL 解决了"内存数据在 flush 前宕机会丢"的持久性问题。代价是每条写入都要过一次 WAL 的顺序 IO。
 

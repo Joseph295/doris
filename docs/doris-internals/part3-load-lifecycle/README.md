@@ -9,7 +9,7 @@
 | [第 3 章](03-tablet-write-path.md) | Tablet 写入细节 | `DeltaWriter` 攒 memtable→flush→Segment 主干、主键表 Delete Bitmap 预算；导入"变慢"的三类根因（flush 跟不上、内存反压、写放大） |
 | [第 4 章](04-commit-and-visibility.md) | 事务提交与可见性 | `COMMITTED ≠ VISIBLE` 的源码兑现；存算一体 `PublishVersionDaemon` 逐 BE publish vs 存算分离 MetaService 一次 FDB 事务；两种模式的延迟与失败模式 |
 | [第 5 章](05-other-load-paths.md) | 其他导入方式 | Broker / Routine / Insert Into / Group Commit 与 Stream Load 共用同一写入内核，差异只在触发方与数据源接入层 |
-| [第 6 章](06-compaction.md) | Compaction | 为何 LSM 类系统绕不开合并；base / cumulative / full 策略；双模式执行位置；`-235` 不是导入的病，而是后台合并的告警灯 |
+| [第 6 章](06-compaction.md) | Compaction | 为何 LSM 类系统绕不开合并；base / cumulative（及 full 概览）；双模式执行位置；`-235` 不是导入的病，而是后台合并的告警灯 |
 
 读完这六章，你应当能画出一批数据从 `curl` 到可见、再到被后台合并的完整写入路径，判断任意一段写入代码在哪种模式下生效，并能从"导入变慢""事务卡住""-235 告警"这些症状反推到具体环节——这套导入路径与故障坐标系是第六部分导入类故障排查的直接基础。
 

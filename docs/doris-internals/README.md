@@ -78,7 +78,7 @@ flowchart TD
 ### 第三部分：一次导入的一生（已完成）
 
 1. [导入方式总览与事务模型](part3-load-lifecycle/01-load-overview-and-txn.md)——2PC、Label 机制、事务状态机
-2. [Stream Load 全路径](part3-load-lifecycle/02-stream-load-path.md)——HTTP 接入→计划→Sink→MemTable→Flush
+2. [Stream Load 全路径](part3-load-lifecycle/02-stream-load-path.md)——HTTP 接入→计划→Sink 分发（至 DeltaWriter 门口）
 3. [Tablet 写入细节](part3-load-lifecycle/03-tablet-write-path.md)——MemTable、Segment 生成、主键模型 Delete Bitmap
 4. [事务提交与可见性](part3-load-lifecycle/04-commit-and-visibility.md)——存算一体 Publish Version vs 存算分离 MetaService 提交
 5. [其他导入方式](part3-load-lifecycle/05-other-load-paths.md)——Broker/Routine/Insert Into/Group Commit 的路径差异
