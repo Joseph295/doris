@@ -4,11 +4,11 @@
 >
 > **本章是案例章，采用"案例五段式"而非机制章的标准骨架**：每个案例按 `问题背景 → 根因分析 → 修复思路 → 源码对照 → 经验教训` 展开，对应"案例三问"——踩了什么坑、为什么会踩、怎么修的又为什么这么修。机制细节一律回链前六部分，本章的增量在于"用真实事故检验机制"。
 
-第 2 部分第 3 章（[part2 ch3](../part2-query-lifecycle/03-nereids-rbo.md)）在讲谓词下推时留过一句预言：`> 历史上多个数据库（包括 Doris 自身早期）都在 outer join 谓词处理上栽过跟头，本系列 part7 案例集会专门收录这类正确性事故`（§3.3）。§3.6 的排查清单又把 part7 案例集写成了"结果错误怀疑重写时"的对照目标。本章就是这句预言的**实证收口**：我们不重讲"谓词下推是历史 bug 高发区"这个结论，而是把两起真实的 wrong-result 事故摊开，看清"静默返回错误行"到底是怎么从一行看似无害的守卫代码里长出来的。
+第 2 部分第 3 章（[part2 ch3](../part2-query-lifecycle/03-nereids-rbo.md)）在讲谓词下推时留过一句预言：`> 历史上多个数据库（包括 Doris 自身早期）都在 outer join 谓词处理上栽过跟头，本系列 part7 案例集会专门收录这类正确性事故`（§3.3）。§3.6 的排查清单又把 part7 案例集写成了"结果错误怀疑重写时"的对照目标。本章是这句预言的**首批实证**（那句预言点名的 outer join 谓词专项事故不在 C1/C5 之列，留待后续案例收口，本章先兑现"谓词下推是历史 bug 高发区"这个更大的结论）：我们不重讲这个结论本身，而是把两起真实的 wrong-result 事故摊开，看清"静默返回错误行"到底是怎么从一行看似无害的守卫代码里长出来的。
 
 优化器算错结果，比算慢可怕得多——慢会报警、会被 profile 抓住，错则不报错、不抛异常，只是行数或值悄悄不对，往往到下游对账才暴露。本章两个案例分别命中优化器正确性的两大陷阱类别：
 
-- **案例一（C1，主案例，FE Nereids）**：命中"**等价变换的隐含前提**"。谓词下推、谓词推导这些"永远不亏"的规则，其"等价"是有前提的——前提之一是**谓词求值幂等**。当谓词里含 `rand()` / `uuid()` 这类非幂等（volatile）函数，且这类函数的输入 slot 集合为空时，规则里用来判断"能不能推"的全称守卫 `containsAll(emptySet)` 静默恒真，把易变谓词错误地推过了算子边界。这是一次 PR 同时修 7 处规则的"同一根因、多处规则"范式教材。
+- **案例一（C1，主案例，FE Nereids）**：命中"**等价变换的隐含前提**"。谓词下推、谓词推导这些"永远不亏"的规则，其"等价"是有前提的——前提之一是**谓词求值幂等**。当谓词里含 `rand()` / `uuid()` 这类非幂等（volatile）函数，且这类函数的输入 slot 集合为空时，规则里用来判断"能不能推"的全称守卫 `containsAll(emptySet)` 静默恒真，把易变谓词错误地推过了算子边界。这是一次 PR 同时给 8 个生产规则文件补守卫的"同一根因、多处规则"范式教材（含 NLJ 侧的同类兄弟规则，见源码对照段）。
 - **案例二（C5，副案例，BE 执行）**：命中"**NULL 三值逻辑**"。相关 `NOT IN` 子查询在析取下被 FE 改写成 mark null-aware left anti join，BE 侧哈希表在探测键为 NULL 时**提前推进了探测下标**，null-probe 处理路径还没算出 mark 列就跳过了该行，导致结果不全。这是 FE 改写 + BE 执行协作的 NULL 语义 bug，核心 diff 仅两行。
 
 两个陷阱有一个共同的抽象内核：**规则/算子在写下它的等价性时，隐式假设了一类输入不会出现**（幂等的谓词、非 NULL 的探测键），而恰恰是这类被忽略的输入类别，成了正确性 bug 的温床。一个在 FE 优化器（Java）、一个在 BE 执行引擎（C++），层次相隔甚远，却是同一种思维盲区的两次显影——这也是把它们放进同一章对照讲的原因：读完你要建立的直觉不是"记住这两个 bug"，而是"拿到任何一条等价变换或算子实现，先追问它对非幂等、对 NULL 这两类输入是否显式表过态"。
@@ -35,7 +35,7 @@ WHERE rand() > 0.5;   -- 非幂等谓词，作用在窗口结果之上
 
 按 SQL 语义，`rand() > 0.5` 必须**在窗口函数算完之后**执行——它是对"已经带上 `rn` 的结果行"做随机采样。但谓词下推规则 `PushDownFilterThroughWindow` 若把 `rand() > 0.5` 推到 `Window` 算子**之下**，就变成"先随机丢掉一半基表行，再对幸存行算窗口"。窗口函数按分区计算，分区内容一变，每一行的 `row_number` / `rank` / `sum` 全变——结果与原语义完全不同，且**不报错**。
 
-举个具象口径：设某分区 `k=1` 原有 5 行，正确语义下它们的 `rn` 应是 1..5，之后被 `rand()>0.5` 随机采样、`rn` 值不变；而错误下推后，5 行先被随机砍到 2 行，再算 `rn` 就只有 1、2 两个值——同一条输入行拿到的 `rn` 与正确语义相差甚远。用户看到的是"row_number 结果对不上"，却完全无从判断是优化器动了谓词位置。同类现象也出现在 Repeat（grouping set 采样口径变了聚合值变）、PartitionTopN（"top-N 后随机过滤"退化成"随机过滤后 top-N"，幸存行不再是真正的 top-N）、SetOperation（`INTERSECT` 变成"半个 A 交半个 B"而非"半个 (A 交 B)"）、Join（ON 谓词里的 `rand()` 求值粒度从"每对连接行一次"变成"每个输入行一次"）等多处边界。这也是为什么一次 PR 要同时动 7 处——它们共用同一个空 slot 守卫漏洞，只是触发的算子不同。
+举个具象口径：设某分区 `k=1` 原有 5 行，正确语义下它们的 `rn` 应是 1..5，之后被 `rand()>0.5` 随机采样、`rn` 值不变；而错误下推后，5 行先被随机砍到 2 行，再算 `rn` 就只有 1、2 两个值——同一条输入行拿到的 `rn` 与正确语义相差甚远。用户看到的是"row_number 结果对不上"，却完全无从判断是优化器动了谓词位置。同类现象也出现在 Repeat（grouping set 采样口径变了聚合值变）、PartitionTopN（"top-N 后随机过滤"退化成"随机过滤后 top-N"，幸存行不再是真正的 top-N）、SetOperation（`INTERSECT` 变成"半个 A 交半个 B"而非"半个 (A 交 B)"）、Join（ON 谓词里的 `rand()` 求值粒度从"每对连接行一次"变成"每个输入行一次"）等多处边界。这也是为什么一次 PR 要同时动 8 个规则文件——它们共用同一个空 slot 守卫漏洞，只是触发的算子不同。
 
 ### 根因分析
 
@@ -59,7 +59,7 @@ Nereids 早已为"是否含非幂等表达式"备好了判定原语：`Expressio
 - 对 Join 的 ON 谓词：volatile 谓词要留在 join 里（保持"每对连接行求值一次"的粒度），而重复出现的 volatile 表达式还要靠 `AddProjectForVolatileExpression` 物化成一个共享值，避免被多次独立求值；
 - 对哈希连接条件抽取（`JoinUtils` 里的 hash 条件判定）与谓词推导（`InferPredicates`）：volatile 相等式不能当哈希连接条件、volatile 谓词不能被克隆到"原本没求值过它"的子树里。
 
-这些差异决定了不存在一个"框架层一刀切"的正确处理——每条规则要的是"跳过 / 留在原地 / 物化"三种不同动作，所以修复必须逐规则落地。这也解释了为什么一个根因会散成一次 7 处的 PR。
+这些差异决定了不存在一个"框架层一刀切"的正确处理——每条规则要的是"跳过 / 留在原地 / 物化"三种不同动作，所以修复必须逐规则落地。这也解释了为什么一个根因会散成一次覆盖 8 个规则文件的 PR。
 
 ### 源码对照
 
@@ -106,9 +106,13 @@ Join 与谓词推导两处用的是"留在原地 / 不克隆"的变体。`PushDo
 
 当前 HEAD `fe/fe-core/src/main/java/org/apache/doris/nereids/util/JoinUtils.java:121`~`:122`。
 
+还有一个容易漏数的兄弟规则：`ProjectOtherJoinConditionForNestedLoopJoin`——它负责把 NLJ 的 other 条件里的确定性子表达式抽成 project 别名，一旦把 `t1.a + rand() > t2.b` 这类混合表达式（`inputSlots={t1.a}`）也抽进某个孩子的 project，`rand()` 的求值粒度就从"每对连接行"变成"每个孩子行"，静默改结果。修复给它加了同一个守卫：`if (expression.containsVolatileExpression()) { return super.visit(expression, ctx); }`——含 volatile 就保持 conjunct inline、只继续递归抽取其中的确定性子表达式（当前 HEAD `fe/fe-core/src/main/java/org/apache/doris/nereids/rules/rewrite/ProjectOtherJoinConditionForNestedLoopJoin.java:117`）。**连它在内，本 PR 一共给 8 个生产规则文件补了 `containsVolatileExpression()` 守卫**（此外还顺带清理了一处无关的 `CastException` 构造，与本案例无关，不计入）——这个"8"要以 `git show 8255f94bc5` 的文件清单为准，而非 message 里列的 7 个编号条目：**message 的编号叙述漏了 NLJ 这条，正是"结论取自 diff 不取自 message"该自我检验的地方**。
+
 最复杂的一处是 `AddProjectForVolatileExpression`：join 无法在"连接对"这个作用域插 project，但重复出现的 volatile 表达式又必须物化成一个共享值（否则 `t.a >= rand() AND t.a <= rand()` 里两个 `rand()` 会被各求一次，退化成永假/永真的荒谬谓词），于是新增了 `rewriteJoinExpressions`（当前 HEAD `fe/fe-core/src/main/java/org/apache/doris/nereids/rules/rewrite/AddProjectForVolatileExpression.java:274`）与内部结果类 `JoinRewriteResult`（同文件 `:383`）。它的落侧决策有一层讲究：slot-free 的 volatile 函数（如裸 `rand()`）用**所在 conjunct 的 slot**来选边，所以 `t2.k + rand()` 能把 `rand()` 物化到右孩子；带输入 slot 的 volatile 函数则用**自身 slot**选边，避免仅因所在 conjunct 也引用了 `t1` 就把 `volatile_udf(t2.k)` 错挂到左侧；自身 slot 横跨两个孩子的则无法物化进任一侧，保持原样。这段逻辑的单测在 diff 里覆盖了"物化到右侧""默认物化到左侧""带右侧输入的 volatile 函数物化到右侧""跨双侧则跳过"四个分支。
 
 **一处必须诚实指出的 message 与 diff 出入**：commit message 的第 1 条列的是对 Repeat 规则的守卫，但本次 `git show 8255f94bc5` 的**改动文件清单里并不包含**该规则源文件；而当前 HEAD 的 `fe/fe-core/src/main/java/org/apache/doris/nereids/rules/rewrite/PushDownFilterThroughRepeat.java:74`~`:75` 仍是不带 volatile 守卫的裸 `commonGroupingSetExpressions.containsAll(conjunctSlots)`。这说明 message 描述的意图**宽于**实际 diff 的落地范围（Repeat 的守卫或在其他 PR、或尚未补齐）。这恰好印证了本系列的写作纪律：**结论只能取自 diff，不能取自 message 的叙述**——同样地，读者复盘时判断"某条规则到底修没修"，也应以文件清单和 hunk 为准，而非 message 的自述。
+
+同一个 commit 还有第二处 message 与代码的漂移：message 通篇把守卫方法称作 `containsUniqueFunction()`（`This PR adds containsUniqueFunction() guards to the following rules`），而实际 diff 里所有守卫调用的是 `containsVolatileExpression()`——方法名对不上。这类"叙述用词与真实符号不一致"的漂移无伤正确性，但会误导按 message 里的方法名去 grep 源码的人（grep `containsUniqueFunction` 一无所获）。它和上面的 Repeat 漏项是同一个教训的两面：**读 commit 要读 diff 的符号本身，message 的措辞只是作者当时的心智模型，可能与落地代码有偏差**。
 
 下面用一张图对照 C1 的变换前后计划形态（以 Window 为例）：
 
