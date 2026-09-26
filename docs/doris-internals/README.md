@@ -52,7 +52,7 @@ flowchart TD
 | 第三部分：一次导入的一生 | 从事务模型到 Compaction，走完一次写入的完整生命周期 | 已完成 |
 | 第四部分：元数据与 FE 内核 | Catalog 体系、持久化、高可用与存算分离元数据服务的内部机制 | 已完成 |
 | 第五部分：存储引擎深潜 | Rowset/Segment 文件格式、索引体系、读路径与主键模型内核 | 已完成 |
-| 第六部分：集群运维与故障排查 | 从症状到根因的系统化故障定位方法论 | 规划中 |
+| 第六部分：集群运维与故障排查 | 从症状到根因的系统化故障定位方法论 | 已完成 |
 | 第七部分：经典 feature/bug 案例集 | 从 git 历史精选真实案例做源码级复盘 | 规划中 |
 
 ### 第一部分：全局架构与设计哲学（已完成）
@@ -102,16 +102,16 @@ flowchart TD
 5. [数据管理](part5-storage-engine/05-data-management.md)——Delete、Schema Change、分区生命周期
 6. [存算分离存储](part5-storage-engine/06-cloud-storage.md)——File Cache 内核、对象存储交互、回收责任边界
 
+### 第六部分：集群运维与故障排查（已完成）
+
+1. [排查方法论与工具箱](part6-operations/01-toolbox.md)——日志、内省表、Profile、Metrics、debug point 五件工具与"症状→子系统"决策树
+2. [查询类故障：慢、爆、超时](part6-operations/02-query-issues.md)——慢/爆/超时按症状分诊，三处秒表与内存"背锅侠"的处置清单
+3. [导入类故障：失败、积压与事务卡住](part6-operations/03-load-issues.md)——快失败/积压/卡住三类表现，-235 与事务卡住的处置卡
+4. [副本与均衡故障（一体）／缓存与计算组故障（分离）](part6-operations/04-replica-and-cache-issues.md)——一体副本修复与均衡 vs 分离 File Cache 与计算组，ADMIN 危险命令核到源码
+5. [FE 故障：选主、元数据与恢复](part6-operations/05-fe-issues.md)——选主异常、元数据恢复与 image 回滚的高危处置规程
+6. [内存管理：BE 内存模型与 MemTracker](part6-operations/06-memory.md)——MemTracker 树、三层限额、全局仲裁与进程自保牺牲顺序
+
 以下部分的章节规划摘自设计文档第 6 节，写作过程中如有增删会回到设计文档同步更新。
-
-### 第六部分：集群运维与故障排查（规划中）
-
-1. 排查方法论与工具箱：日志体系、内省表、Profile、Metrics、debug point
-2. 查询类故障：慢查询、OOM、超时的系统定位法
-3. 导入类故障：失败、积压、事务卡住
-4. 副本与均衡类故障（存算一体）／缓存与计算组故障（存算分离）
-5. FE 故障：选主异常、元数据损坏恢复、image 回滚
-6. 内存管理：BE 内存模型、MemTracker、常见内存问题定位
 
 ### 第七部分：经典 feature/bug 案例集（规划中）
 
