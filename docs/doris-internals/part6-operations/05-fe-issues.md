@@ -121,9 +121,9 @@ flowchart TD
 
 **这是全章最危险的操作。** 适用且**仅**适用：多数派 FOLLOWER 已**永久损毁**、集群无论如何选不出主，而你手上有某一个节点保有相对完整的一份元数据，要拿它**单方面**把复制组重置、强行拉起一个单点集群救急。
 
-先把它是什么核清楚（[part4 第 2 章](../part4-fe-internals/02-editlog-and-checkpoint.md) §2.3、[part4 第 3 章](../part4-fe-internals/03-fe-ha.md) §3.6 已反复警告）：它**不是** FE 配置项，而是一个**启动参数**——`bin/start_fe.sh:35` 声明 `--metadata_failure_recovery`、`:69` 把它映射成 `-r`；`DorisFE` 收到 `-r` 后设置系统属性（`fe/fe-core/src/main/java/org/apache/doris/DorisFE.java:377`、`:418`-`419`，常量 `FeConstants.METADATA_FAILURE_RECOVERY_KEY`）。`BDBJEJournal` 启动时读这个属性（`fe/fe-core/src/main/java/org/apache/doris/journal/bdbje/BDBJEJournal.java:507`），传给 `BDBEnvironment`，在 `setup` 里触发 `DbResetRepGroup.reset()` 把整个复制组重置（`fe/fe-core/src/main/java/org/apache/doris/journal/bdbje/BDBEnvironment.java:110`-`114`）。它的语义是"丢掉未复制的日志、拿本地这份把复制组从头重置起来"。
+先把它是什么核清楚（[part4 第 2 章](../part4-fe-internals/02-editlog-and-checkpoint.md) §2.3、[part4 第 3 章](../part4-fe-internals/03-fe-ha.md) §3.6 已反复警告）：它**不是** FE 配置项，而是一个**启动参数**——`bin/start_fe.sh:35` 声明 `--metadata_failure_recovery`、`:70` 把它映射成 `-r`；`DorisFE` 收到 `-r` 后设置系统属性（`fe/fe-core/src/main/java/org/apache/doris/DorisFE.java:377`、`:418`-`419`，常量 `FeConstants.METADATA_FAILURE_RECOVERY_KEY`）。`BDBJEJournal` 启动时读这个属性（`fe/fe-core/src/main/java/org/apache/doris/journal/bdbje/BDBJEJournal.java:507`），传给 `BDBEnvironment`，在 `setup` 里触发 `DbResetRepGroup` 的 `reset()` 把整个复制组重置（`fe/fe-core/src/main/java/org/apache/doris/journal/bdbje/BDBEnvironment.java:110`-`114`）。它的语义是"丢掉未复制的日志、拿本地这份把复制组从头重置起来"。
 
-代码本身设了两道护栏，正好印证它有多危险：其一，**非可选举节点不许用**——`setup` 开头若 `metadataFailureRecovery && !isElectable` 直接 `System.exit(-1)`（`fe/fe-core/src/main/java/org/apache/doris/journal/bdbje/BDBEnvironment.java:106`-`109`），OBSERVER 不能拿来当恢复起点。其二，**meta 目录为空时不许用**——首次启动（`meta_dir` 空）加 `-r` 会抛 `DatabaseNotFoundException`，日志明说 "It is not allowed to set metadata_failure_recovery when meta dir or bdbje dir is empty"（`fe/fe-core/src/main/java/org/apache/doris/journal/bdbje/BDBJEJournal.java:516`-`517`），防止你在空节点上"恢复"出一个假权威。
+代码本身设了两道护栏，正好印证它有多危险：其一，**非可选举节点不许用**——`setup` 开头若 `metadataFailureRecovery && !isElectable` 直接 `System.exit(-1)`（`fe/fe-core/src/main/java/org/apache/doris/journal/bdbje/BDBEnvironment.java:106`-`109`），OBSERVER 不能拿来当恢复起点。其二，**meta 目录为空时不许用**——首次启动（`meta_dir` 空）加 `-r` 会抛 `DatabaseNotFoundException`，日志明说"不允许在 meta 或 bdbje 目录为空时设 metadata_failure_recovery"（`fe/fe-core/src/main/java/org/apache/doris/journal/bdbje/BDBJEJournal.java:516`-`517`，原文为跨行拼接的英文串，此处转写），防止你在空节点上"恢复"出一个假权威。
 
 **危险操作规程（前置检查 → 操作 → 验证 → 回退）：**
 
@@ -147,7 +147,7 @@ flowchart TD
 诊断阶段想看 bdbje 里到底有哪些日志、区间如何，用只读工具，别一上来就动恢复参数。[part4 第 2 章](../part4-fe-internals/02-editlog-and-checkpoint.md) §2.5 已介绍过它们，这里补调用入口：
 
 - **`BDBTool`**（`fe/fe-core/src/main/java/org/apache/doris/journal/bdbje/BDBTool.java:50`，配套 `BDBToolOptions`，`fe/fe-core/src/main/java/org/apache/doris/journal/bdbje/BDBToolOptions.java:24`）：经 `DorisFE` 的 `-b`/`--bdb` 进入（`fe/fe-core/src/main/java/org/apache/doris/DorisFE.java:370`），`-l`/`--listdb` 列出所有 bdbje database（每个对应一段封存日志区间，`:371`、`:433`-`436`），`-d`/`--db <name>` 配 `--stat` 看某段的条数与首尾 key（`:372`）。**它要独占打开 bdbje 环境，务必在 FE 停机、或对着 `meta_dir` 的冷备副本跑**——对着在跑的生产 `meta_dir` 开会冲突。
-- **`BDBDebugger`**（`fe/fe-core/src/main/java/org/apache/doris/journal/bdbje/BDBDebugger.java:57`）：交互式，由 `enable_bdbje_debug_mode`（`fe/fe-common/src/main/java/org/apache/doris/common/Config.java:1542`）在启动时开启，`DorisFE` 侧读该 `Config` 字段为真则走 `startDebugMode`（`BDBDebugger.get()`）（`fe/fe-core/src/main/java/org/apache/doris/DorisFE.java:221`-`223`）。
+- **`BDBDebugger`**（`fe/fe-core/src/main/java/org/apache/doris/journal/bdbje/BDBDebugger.java:57`）：交互式，由 `enable_bdbje_debug_mode`（`fe/fe-common/src/main/java/org/apache/doris/common/Config.java:1542`）在启动时开启，`DorisFE` 侧读该 `Config` 字段为真则走 `BDBDebugger` 的 `get()` 再 `startDebugMode`（`fe/fe-core/src/main/java/org/apache/doris/DorisFE.java:221`-`223`）。
 
 原则：**先用只读工具看清楚"日志在不在、到哪一条"，再决定要不要走高危恢复**。看清现场是所有恢复决策的前提。
 
@@ -157,7 +157,7 @@ flowchart TD
 
 **变化的是切主影响面——分离模式更小。** [part3 第 1 章](../part3-load-lifecycle/01-load-overview-and-txn.md) §1.4 与 [part4 第 3 章](../part4-fe-internals/03-fe-ha.md) §3.4 都证过：分离模式把事务、tablet 版本这些"重且高频变"的权威状态外移到了 MetaService（背后 FDB），FE 基本不写事务 editlog。直接后果是**切主要回放的 FE 自有元数据更薄、回放窗口更短**（§5.2 症状二那个窗口在分离模式下天然更小），元数据 image 也更小、损坏恢复更快。这是分离模式在 FE 故障维度实打实的减负。
 
-**但它多出一类全新的"FE 起不来"根因：连不上 MS。** 这是分离模式独有、一体模式没有的启动失败类别，必须会判别。一体模式 FE 的角色来自本地 ROLE 文件 + helper；**分离模式 FE 的角色来自 MetaService**——`CloudEnv` 的 `getClusterIdAndRole` 在一个循环里调 `getLocalTypeFromMetaService`（`fe/fe-core/src/main/java/org/apache/doris/cloud/catalog/CloudEnv.java:204`、`:258` 起）向 MS 要自己的节点类型。若 MS 不可达或返回非 OK，`getCloudCluster` 拿不到有效响应、`getLocalTypeFromMetaService` 返回 null（`fe/fe-core/src/main/java/org/apache/doris/cloud/catalog/CloudEnv.java:209`-`214`），循环就打印 `failed to get local fe's type, sleep ... try again.`（`:270`-`273`）、睡 `resource_not_ready_sleep_seconds` 后**无限重试**。
+**但它多出一类全新的"FE 起不来"根因：连不上 MS。** 这是分离模式独有、一体模式没有的启动失败类别，必须会判别。一体模式 FE 的角色来自本地 ROLE 文件 + helper；**分离模式 FE 的角色来自 MetaService**——`CloudEnv` 的 `getClusterIdAndRole` 在一个循环里调 `getLocalTypeFromMetaService`（`fe/fe-core/src/main/java/org/apache/doris/cloud/catalog/CloudEnv.java:204`、`:255`）向 MS 要自己的节点类型。若 MS 不可达或返回非 OK，`getCloudCluster` 拿不到有效响应、`getLocalTypeFromMetaService` 返回 null（`fe/fe-core/src/main/java/org/apache/doris/cloud/catalog/CloudEnv.java:209`-`214`），循环就打印 `failed to get local fe's type, sleep ... try again.`（`:263`-`268`）、睡 `resource_not_ready_sleep_seconds` 后**无限重试**。
 
 **判别方法**（分离模式 FE 起不来时的第一刀）：看 `fe.log` 停在哪。
 
