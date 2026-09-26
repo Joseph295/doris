@@ -11,4 +11,4 @@
 | [第 5 章](05-fe-issues.md) | FE 故障：选主、元数据与恢复 | 默认先保元数据再恢复服务；`-r`（metadata_failure_recovery）有"空目录起假权威""多 FE 并存"两大灾难，动前必冷备 meta_dir |
 | [第 6 章](06-memory.md) | 内存管理：BE 内存模型与 MemTracker | 内存是有归属的树、报错 `type` 是路标；`/mem_tracker` 已下线改用 `/profile`；自保双轨——soft 先收 cache、hard 才 memory_gc 取消 top 查询 |
 
-**下一部分预告**：第七部分《经典 feature/bug 案例集》从 git 历史精选真实案例做源码级复盘。该部分仍在规划中，详见[系列总目录](../README.md)。
+**下一部分预告**：[第七部分《经典 feature/bug 案例集》](../part7-case-studies/README.md)——从 git 历史精选真实案例做源码级复盘，按优化器错误结果、主键模型正确性、内存回退、存算分离一致性、并发竞争五个方向，用真实事故检验前六部分讲过的机制。

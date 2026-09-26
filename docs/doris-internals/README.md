@@ -53,7 +53,7 @@ flowchart TD
 | 第四部分：元数据与 FE 内核 | Catalog 体系、持久化、高可用与存算分离元数据服务的内部机制 | 已完成 |
 | 第五部分：存储引擎深潜 | Rowset/Segment 文件格式、索引体系、读路径与主键模型内核 | 已完成 |
 | 第六部分：集群运维与故障排查 | 从症状到根因的系统化故障定位方法论 | 已完成 |
-| 第七部分：经典 feature/bug 案例集 | 从 git 历史精选真实案例做源码级复盘 | 规划中 |
+| 第七部分：经典 feature/bug 案例集 | 从 git 历史精选真实案例做源码级复盘 | 已完成 |
 
 ### 第一部分：全局架构与设计哲学（已完成）
 
@@ -111,11 +111,13 @@ flowchart TD
 5. [FE 故障：选主、元数据与恢复](part6-operations/05-fe-issues.md)——选主异常、元数据恢复与 image 回滚的高危处置规程
 6. [内存管理：BE 内存模型与 MemTracker](part6-operations/06-memory.md)——MemTracker 树、三层限额、全局仲裁与进程自保牺牲顺序
 
-以下部分的章节规划摘自设计文档第 6 节，写作过程中如有增删会回到设计文档同步更新。
+### 第七部分：经典 feature/bug 案例集（已完成）
 
-### 第七部分：经典 feature/bug 案例集（规划中）
-
-从 git 历史挑选 8~12 个真实案例，每案例讲：问题背景→根因分析→修复思路→源码对照→经验教训。候选方向：优化器错误结果类、主键模型正确性类、内存/性能回退类、存算分离一致性类、并发竞争类。具体 PR 编号在写作阶段从 git log 落实。
+1. [优化器为何算错](part7-case-studies/01-optimizer-wrong-results.md)——非幂等谓词跨算子下推与 NULL-aware anti join 两类"静默错结果"
+2. [主键模型的正确性边界](part7-case-studies/02-mow-correctness.md)——partial update × rollup 组合边界与 compaction 失败路径的 bitmap 泄漏
+3. [内存与性能回退](part7-case-studies/03-memory-regressions.md)——`allocated_bytes()` 含 padding 误判与背压上限缺字节量纲两类容量误读
+4. [存算分离的一致性暗礁](part7-case-studies/04-cloud-consistency.md)——同一 cloud schema change 机制的连环三修与本地镜像逐版本对齐 MS
+5. [并发竞争的经典形态](part7-case-studies/05-concurrency.md)——两种 UAF（悬垂 `this` / 悬垂 vtable）触发时序对照，与一种锁自嵌套自死锁
 
 ## 环境准备（速览）
 
