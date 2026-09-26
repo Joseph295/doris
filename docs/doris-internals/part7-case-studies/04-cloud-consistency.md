@@ -56,7 +56,7 @@ commit message 把因果链交代得极清楚。SC 提交时，**MS 侧是对的
 
 第一层，`add_rowsets` 的 overlap 检查是**单向**的。它判断一个新 rowset 是否要顶掉已有 rowset，用的是 `to_add_v.contains(v)` 这类"新版本区间是否包含旧版本区间"的判断。SC 输出是**逐版本**的单版本 rowset（`[818]`、`[819]`、…、`[822]`），而本地残留的是 compaction 宽 rowset `[818-822]`。于是 `[818].contains([818-822])` 求值为 **false**——单版本区间当然不可能包含宽区间——`add_rowsets` 便认为二者不冲突，宽 rowset `[818-822]` **原样留在** `_rs_version_map` 里。
 
-第二层，版本图的 capture 是**贪心选宽**的。[part5 第 4 章](../part5-storage-engine/04-mow-internals.md) §4.3 提到读取要先 capture 一条连续版本路径；这条路径由 `capture_consistent_versions`（`be/src/storage/version_graph.cpp:416`）在版本图上走出来。它的选路策略是**在每个节点上选"不超过终点的最大版本"边**——源码注释就写在那里（`be/src/storage/version_graph.cpp:451`：`This version is the largest version that smaller than end_version`）。这意味着：只要宽 rowset `[818-822]` 的边还在图里，从 818 出发时 capture 会**优先走这条宽边**，而不是逐版本的 `[818]→[819]→…`。
+第二层，版本图的 capture 是**贪心选宽**的。[part5 第 4 章](../part5-storage-engine/04-mow-internals.md) §4.3 提到读取要先 capture 一条连续版本路径；这条路径由 `capture_consistent_versions`（`be/src/storage/version_graph.cpp:416`）在版本图上走出来。它的选路策略是**在每个节点上选"不超过终点的最大版本"边**——源码注释就写在那里（`be/src/storage/version_graph.cpp:452`：`This version is the largest version that smaller than` `end_version`，`end_version` 原文即带反引号）。这意味着：只要宽 rowset `[818-822]` 的边还在图里，从 818 出发时 capture 会**优先走这条宽边**，而不是逐版本的 `[818]→[819]→…`。
 
 两层叠加的后果是致命的：残留的宽 compaction rowset `[818-822]` 既没被 `add_rowsets` 删掉、又被 capture 优先选中。而这条宽 rowset 的 **delete bitmap 不覆盖 SC 输出行**——它是 SC 之前的产物，压根不知道 SC 重排后每行落在哪。于是读取时走了这条宽路径、又缺 bitmap 遮蔽，SC 输出的行与宽 rowset 的行同时可见 → **重复键**。
 
@@ -73,7 +73,7 @@ commit message 把因果链交代得极清楚。SC 提交时，**MS 侧是对的
 
 ### 源码对照
 
-`git show dd59f479af` 新增的方法（历史态 `dd59f479af:be/src/cloud/cloud_tablet.cpp`，此为 commit 引入时的原样，注释保留、无省略）：
+`git show dd59f479af` 新增的方法（历史态 `dd59f479af:be/src/cloud/cloud_tablet.cpp`，stale 绕过说明注释块按标注省略）：
 
 ```cpp
 +void CloudTablet::delete_rowsets_for_schema_change(const std::vector<RowsetSharedPtr>& to_delete,
@@ -91,7 +91,7 @@ commit message 把因果链交代得极清楚。SC 提交时，**MS 侧是对的
 +        // output rowsets (e.g. [818-822] vs [818],[819],...,[822]).
 +        _timestamped_version_tracker.delete_version(rs->version());
 +    }
-+    ...（省略 stale 绕过说明注释 5 行）...
++    ...（省略 1 空行 + stale 绕过说明注释 6 行）...
 +    _tablet_meta->modify_rs_metas({}, rs_metas, true);
 +
 +    // Schedule for direct cache cleanup. MS has already recycled these rowsets.
@@ -112,8 +112,8 @@ commit message 把因果链交代得极清楚。SC 提交时，**MS 侧是对的
 +                    to_delete.push_back(rs);
 +                }
 +            }
-+            ...（省略 LOG_INFO 打印 8 行）...
 +            if (!to_delete.empty()) {
++                ...（省略 LOG_INFO 打印 8 行）...
 +                _new_tablet->delete_rowsets_for_schema_change(to_delete, wlock);
 +            }
 +        }
@@ -143,7 +143,7 @@ commit 自带四个单测（历史态 `dd59f479af:be/test/cloud/cloud_tablet_tes
 
 C13 补上了"提交时删残留",四十天后又浮出同一机制的第二处破口，这次在**下游**。SC 计算 delete bitmap 时会为版本洞造一些**空 rowset**（empty/hole rowset），但这些空 rowset 只被加到了**临时 tablet**上；**真实新 tablet**在 `alter_version` 之后可能带着一个**版本洞**就切到了 `TABLET_RUNNING`。一旦它 RUNNING 了、对外可见了，后续这张 RUNNING MOW tablet 再做 delete bitmap 同步时，会在**补洞之前**就去 capture 旧 rowset id——于是 capture 在带洞的版本图上**找不到连续路径**而失败。
 
-这个失败的形态，正是 `capture_consistent_versions` 里两处 `failed to find path in version_graph`（`be/src/storage/version_graph.cpp:432`、`:464`）报错——版本图上从起点走不到终点，中间断了一节。
+这个失败的形态，正是 `capture_consistent_versions` 里两处 find-path 报错——`be/src/storage/version_graph.cpp:434` 的 `failed to find path in version_graph` 与 `:465` 的 `fail to find path in version_graph`（两条文案一字之差："failed" vs "fail"）——版本图上从起点走不到终点，中间断了一节。
 
 ### 根因分析
 
@@ -214,7 +214,7 @@ C13 修好了**提交路径**（真实 tablet），但同一机制里还有一�
 
 C14 做了三件事，前两件是"把 C13 的一次性修补上升为可复用不变量",第三件才是补新调用点：
 
-1. **抽出 `replace_rowsets_with_schema_change_output`**（`be/src/cloud/cloud_tablet.cpp:554`），把 C13 那段内联删除块——"删 `[2,alter_version]` 里非 SC 输出的本地 rowset，再 `add_rowsets(SC 输出)`"——固化成一个方法。判断"哪些是 SC 输出"用的是新加的匿名函数 `is_schema_change_output_rowset`（`be/src/cloud/cloud_tablet.cpp:98`，按 `rowset_id` 匹配）。
+1. **抽出 `replace_rowsets_with_schema_change_output`**（`be/src/cloud/cloud_tablet.cpp:554`），把 C13 那段内联删除块——"删 `[2,alter_version]` 里非 SC 输出的本地 rowset，再 `add_rowsets(SC 输出)`"——固化成一个方法。判断"哪些是 SC 输出"用的是新加的、位于匿名命名空间里的辅助函数 `is_schema_change_output_rowset`（`be/src/cloud/cloud_tablet.cpp:98`，按 `rowset_id` 匹配）。
 2. **让真实 tablet 的提交路径也改调这个方法**（`be/src/cloud/cloud_schema_change_job.cpp:554`），C13 的内联块被整段删除、替换成一次 `replace_rowsets_with_schema_change_output(..., "commit", true)` 调用——**同一份归一化逻辑，从此只有一个实现**。
 3. **在 `_process_delete_bitmap` 的每次 `sync_tablet_rowsets` 之后调同一个方法**（`be/src/cloud/cloud_schema_change_job.cpp:604`、`:630`，两处 sync 各一次），stage 分别标 `"delete_bitmap_without_lock"` 和 `"delete_bitmap_with_lock"`。
 
