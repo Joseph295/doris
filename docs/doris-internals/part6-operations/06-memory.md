@@ -82,7 +82,7 @@
 
 ### reserve：进程红线在分配路径上的把关点
 
-上面两道水位是"判断函数"，谁来调它们、在什么时机拦分配？关键机制是 **reserve（预留）**。算子在要一大块内存前，先调 `GlobalMemoryArbitrator` 的 `try_reserve_process_memory()`（`be/src/runtime/memory/global_memory_arbitrator.h:93`）向进程"预订"这笔额度——预订时就会过 `is_exceed_soft_mem_limit()`/`is_exceed_hard_mem_limit()` 的水位判定。预订成功，这笔额度记进 `_process_reserved_memory`（`:96`），之后线程真正 `malloc` 时从预留里扣、不再重复算进进程用量（`sub_thread_reserve_memory()`，`:105`）；用完或提前释放则 `shrink_process_reserved()`（`:94`）还回去。§6.1 讲的攒批 flush 里那段处理 `_reserved_mem` 的逻辑（`be/src/runtime/memory/thread_mem_tracker_mgr.h:217`~`:247`），干的就是"把已用掉的预留同步回进程账"这件事。
+上面两道水位是"判断函数"，谁来调它们、在什么时机拦分配？关键机制是 **reserve（预留）**。算子在要一大块内存前，先调 `GlobalMemoryArbitrator` 的 `try_reserve_process_memory()`（`be/src/runtime/memory/global_memory_arbitrator.h:93`）向进程"预订"这笔额度——预订时就会过 `is_exceed_soft_mem_limit()`/`is_exceed_hard_mem_limit()` 的水位判定。预订成功，这笔额度记进 `_process_reserved_memory`（声明 `:183`，读取 `:97`），之后线程真正 `malloc` 时从预留里扣、不再重复算进进程用量（`sub_thread_reserve_memory()`，`:105`）；用完或提前释放则 `shrink_process_reserved()`（`:94`）还回去。§6.1 讲的攒批 flush 里那段处理 `_reserved_mem` 的逻辑（`be/src/runtime/memory/thread_mem_tracker_mgr.h:217`~`:247`），干的就是"把已用掉的预留同步回进程账"这件事。
 
 **为什么要 reserve 而不是等 `malloc` 时再拦？** 因为 spill 需要**提前决策**：算子在 build 哈希表前先 reserve 预估内存，reserve 失败就知道"进程扛不住"，此刻还来得及选择落盘（part2 §8.4 的 spill 触发正是挂在 reserve 失败上），而不是等 `malloc` 真的撞墙、内存已经分不出来、只能报错。reserve 把"内存够不够"的判断从**事后**提前到了**事前**，这是 spill 能优雅落盘而非硬 OOM 的前提。
 
@@ -197,7 +197,7 @@ tracker 只能告诉你内存记在哪棵账上（哪个查询/哪类），但�
 2. 施加一点并发查询/导入负载，让进程内存爬过 soft、逼近 hard。
 3. `grep` BE 日志观察牺牲序列：
    - 先看到 cache 收缩相关日志（进程内存变化触发 `refresh_cache_capacity`）；
-   - 越过 hard 线后出现 `[MemoryGC] start MemoryReclamation::revoke_process_memory`（`be/src/runtime/memory/memory_reclamation.cpp:190`）和 `[MemoryGC] start revoke_tasks_memory`（`:76`），revoke_reason 是 `process memory used exceed limit` 或 `sys available memory less than low water mark`；
+   - 越过 hard 线后出现 `[MemoryGC] start MemoryReclamation::revoke_process_memory`（`be/src/runtime/memory/memory_reclamation.cpp:191`）和 `[MemoryGC] start revoke_tasks_memory`（`:76`），revoke_reason 是 `process memory used exceed limit` 或 `sys available memory less than low water mark`；
    - 被牺牲的查询侧报 `MEM_LIMIT_EXCEEDED` 且 `type:global`。
 4. **对比 tracker 总值与 RSS**：`curl .../metrics` 看 jemalloc 的 allocated/resident，算一算 `resident - allocated` 就是缓存+碎片的量级，体会 §6.1 那个"差距是常态"的公式。
 5. **恢复**：把 `be.conf` 的 `mem_limit` 改回 `"90%"`、重启，负载恢复正常。
@@ -224,3 +224,5 @@ tracker 只能告诉你内存记在哪棵账上（哪个查询/哪类），但�
 - 手动应急：`/api/clear_cache/{type}` 清指定 cache、`/api/shrink_mem` 触发一次进程 GC。
 
 **一句话收束**：BE 内存的一切排查，都绕着一个中心——**内存是一棵有归属的树，报错的 `type` 是它的路标，`/profile` 是它的地图，`[MemoryGC]` 是自保的手术记录，而 tracker 与 RSS 的差距是 jemalloc 留的正常余量、不是伤口。** 把这四件事分清楚，§2.3 那个「背锅侠」就再也骗不到你了。
+
+至此，第六部分「集群运维与故障排查」走完了完整的六章：第 1 章立了五件工具与「症状→子系统」的决策树，第 2~5 章沿慢/错/挂/涨把查询、导入、存储层、FE 四类故障各自缝成从症状出发的处置线，本章补齐了前五部分从未系统讲过的 BE 内存模型、也把 §2.3 的「背锅侠」伏笔闭环。前五部分给了三十二章的「点」，这一部分把它们连成了从症状出发的「线」；后续的[第七部分](../README.md)将从 git 历史精选真实案例做源码级复盘（规划中）。

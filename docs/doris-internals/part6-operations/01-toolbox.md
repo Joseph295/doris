@@ -83,7 +83,8 @@ Doris 把大量运行时状态暴露成**可以用 SQL 查的表**和**可以用
 | 内省表 | 产生点（类名） | 排查什么 |
 |---|---|---|
 | `backends()` | `BackendsTableValuedFunction` | BE 是否 alive、磁盘用量、心跳 |
-| `frontends()` / `frontends_disks()` | `FrontendsTableValuedFunction` | FE 角色（Master/Follower/Observer）、是否 join、元数据盘 |
+| `frontends()` | `FrontendsTableValuedFunction` | FE 角色（Master/Follower/Observer）、是否 join、元数据盘 |
+| `frontends_disks()` | `FrontendsDisksTableValuedFunction` | FE 元数据盘用量 |
 | `active_queries`（information_schema） | `MetadataGenerator` | 当前在跑的查询及其 BE 占用 |
 | `backend_active_tasks`（information_schema） | `SchemaTable` | 每个 BE 上正在执行的任务/资源 |
 | `processlist`（information_schema） | `SchemaTable` | 连接级会话列表 |
@@ -125,7 +126,7 @@ TVF 支持的元数据类型枚举见 `fe/fe-core/src/main/java/org/apache/doris
 Metrics 是分层里的"指标层"——它不告诉你具体哪条 SQL，而告诉你**哪个子系统在异常**，适合做告警和趋势。两侧各有产生点与端点：
 
 - **BE**：全局指标注册在 `be/src/common/metrics/doris_metrics.h` 的 `DorisMetrics` 单例（如 `fragment_requests_total` `:50`、`query_scan_bytes` `:52`、各类 compaction/clone/schema_change 计数），通过 `/metrics` 端点暴露（注册在 `be/src/service/http_service.cpp:251`，默认 `webserver_port` 8040）。
-- **FE**：指标在 `fe/fe-core/src/main/java/org/apache/doris/metric/MetricRepo.java`（如 `COUNTER_QUERY_ALL` `:118`、`COUNTER_QUERY_ERR` `:119`、`COUNTER_QUERY_SLOW` `:120`），通过 `fe/fe-core/src/main/java/org/apache/doris/httpv2/rest/MetricsAction.java:44` 的 `/metrics` 暴露（默认 `http_port` 8030），支持 `?type=core` 只取核心指标。
+- **FE**：指标在 `fe/fe-core/src/main/java/org/apache/doris/metric/MetricRepo.java`（如 `COUNTER_QUERY_ALL` `:117`、`COUNTER_QUERY_ERR` `:118`、`COUNTER_QUERY_SLOW` `:119`），通过 `fe/fe-core/src/main/java/org/apache/doris/httpv2/rest/MetricsAction.java:44` 的 `/metrics` 暴露（默认 `http_port` 8030），支持 `?type=core` 只取核心指标。
 
 Metrics 的价值不在"看某一个绝对值"，而在**看趋势和拐点**——一条平稳的曲线突然抬头，往往比任何日志都更早暴露问题。按 1.5 的四类症状，最值得盯的核心指标是：
 
@@ -149,31 +150,38 @@ Metrics 的价值不在"看某一个绝对值"，而在**看趋势和拐点**—
 
 ## 1.5 方法论：从症状到子系统的决策树
 
-这是全部分的导航页。真实故障给你的是**症状**，不是机制分类。把症状归到四大类——**慢、错、挂、涨**——每类先动一件成本最低的工具拿到定位主键，再分流到本部分后续对应章节（第 2~5 章尚未成文，此处以纯文本引用；每个分支同时标注对应前部机制章节，供你回读原理）。
+这是全部分的导航页。真实故障给你的是**症状**，不是机制分类。把症状归到四大类——**慢、错、挂、涨**——每类先动一件成本最低的工具拿到定位主键，再分流到本部分对应章节（每个分支同时标注对应前部机制章节，供你回读原理）。
 
 ```mermaid
 flowchart TD
     S[告警 / 用户反馈] --> Q{哪一类症状?}
 
-    Q -->|慢<br/>查询/导入变慢| SLOW[先看 fe.audit.log<br/>拿 QueryTime/CpuTimeMs/queryId]
+    Q -->|慢<br/>查询慢/忽快忽慢| SLOW[先看 fe.audit.log<br/>拿 QueryTime/CpuTimeMs/queryId]
     Q -->|错<br/>报错/结果不对/查不到| ERR[先看 fe.audit.log 的<br/>ErrorCode + fe.warn.log/be.WARNING]
     Q -->|挂<br/>卡住/不可用/崩溃| HANG[先看 SHOW PROC /cluster_health<br/>+ /current_queries + be.out]
     Q -->|涨<br/>内存/磁盘/积压增长| GROW[先看 Metrics 趋势<br/>+ SHOW PROC /statistic /transactions]
 
     SLOW --> SLOW2[用 queryId 调 profile<br/>走漏斗+指纹]
-    SLOW2 --> C2["本部分第 2 章（慢）<br/>机制回读: part2 §9.4 profile 方法论 /<br/>part2 §7.3 scan 与 File Cache"]
+    SLOW2 --> C2["第 2 章（查询慢）<br/>机制回读: part2 §9.4 profile 方法论 /<br/>part2 §7.3 scan 与 File Cache"]
 
-    ERR --> ERR2[用 queryId grep BE 日志<br/>定位报错 fragment]
-    ERR2 --> C3["本部分第 3 章（错）<br/>机制回读: part5 §4.6 MoW 正确性 /<br/>part4 §1.2 stale-read 查不到"]
+    ERR --> ERR2{报错落在哪条链路?}
+    ERR2 -->|查询报错<br/>MEM_LIMIT/timeout| E1["第 2 章 §2.3/§2.4<br/>内存机制深潜: 第 6 章"]
+    ERR2 -->|导入快失败<br/>-235/Label/error url| E2["第 3 章 §3.2<br/>机制回读: part3 §2.6 / §6.6"]
+    ERR2 -->|结果不对/查不到| E3["一体先查副本: 第 4 章 §4.2<br/>机制回读: part5 §4.6 MoW 正确性 /<br/>part4 §1.2 stale-read 查不到"]
 
-    HANG --> HANG2[定位卡在哪个子系统<br/>选主? publish? 副本调度?]
-    HANG2 --> C4["本部分第 4 章（挂·双模式各半）<br/>机制回读: part4 §3.6 选主 /<br/>part3 §4.5 publish / part4 §5.6 副本调度"]
+    HANG --> HANG2{卡在哪个子系统?}
+    HANG2 -->|事务卡在 COMMITTED<br/>publish 不推进| H1["第 3 章 §3.4<br/>机制回读: part3 §4.5"]
+    HANG2 -->|选不出主 / FE 起不来| H2["第 5 章<br/>机制回读: part4 §3.6"]
+    HANG2 -->|副本修复不动<br/>tablet 不健康| H3["第 4 章 §4.2<br/>机制回读: part4 §5.6"]
 
-    GROW --> GROW2[定位增长源<br/>FE 内存? 版本积压? cache?]
-    GROW2 --> C5["本部分第 5 章（涨）<br/>机制回读: part4 §1.6 FE 内存 /<br/>part3 §6.6 compaction / part5 §6.7 cache"]
+    GROW --> GROW2{什么在涨?}
+    GROW2 -->|版本积压<br/>compaction score 高| G1["第 3 章 §3.3<br/>机制回读: part3 §6.6"]
+    GROW2 -->|BE 内存涨/OOM| G2["第 6 章（唯一机制深潜章）"]
+    GROW2 -->|cache 占满/命中率掉<br/>（分离）| G3["第 4 章 §4.4<br/>机制回读: part5 §6.7"]
+    GROW2 -->|FE 内存涨| G4["回读 part4 §1.6<br/>（本部分无专章）"]
 ```
 
-每个分支的**第一件工具**都遵循 1.1 的分层原则——现象层（审计日志）或指标层（metrics）先行，成本几乎为零，却直接把范围收窄到某个子系统，并拿到贯穿键（`queryId`/`txnId`/`tabletId`）。链接到的前部机制章节均已核实：part2 [第 9 章](../part2-query-lifecycle/09-result-and-profile.md) §9.4（profile 漏斗+指纹）、[第 7 章](../part2-query-lifecycle/07-scan-path.md) §7.3（File Cache）；part5 [第 4 章](../part5-storage-engine/04-mow-internals.md)、[第 6 章](../part5-storage-engine/06-cloud-storage.md)；part4 [第 1 章](../part4-fe-internals/01-catalog-and-memory.md)、[第 3 章](../part4-fe-internals/03-fe-ha.md)、[第 5 章](../part4-fe-internals/05-scheduling.md)；part3 [第 4 章](../part3-load-lifecycle/04-commit-and-visibility.md)、[第 6 章](../part3-load-lifecycle/06-compaction.md)。
+每个分支的**第一件工具**都遵循 1.1 的分层原则——现象层（审计日志）或指标层（metrics）先行，成本几乎为零，却直接把范围收窄到某个子系统，并拿到贯穿键（`queryId`/`txnId`/`tabletId`）。分流到的本部分章节：[第 2 章](./02-query-issues.md)（查询）、[第 3 章](./03-load-issues.md)（导入）、[第 4 章](./04-replica-and-cache-issues.md)（副本与缓存）、[第 5 章](./05-fe-issues.md)（FE）、[第 6 章](./06-memory.md)（内存深潜）。标注的前部机制章节均已核实：part2 [第 9 章](../part2-query-lifecycle/09-result-and-profile.md) §9.4（profile 漏斗+指纹）、[第 7 章](../part2-query-lifecycle/07-scan-path.md) §7.3（File Cache）；part5 [第 4 章](../part5-storage-engine/04-mow-internals.md)、[第 6 章](../part5-storage-engine/06-cloud-storage.md)；part4 [第 1 章](../part4-fe-internals/01-catalog-and-memory.md)、[第 3 章](../part4-fe-internals/03-fe-ha.md)、[第 5 章](../part4-fe-internals/05-scheduling.md)；part3 [第 2 章](../part3-load-lifecycle/02-stream-load-path.md)、[第 4 章](../part3-load-lifecycle/04-commit-and-visibility.md)、[第 6 章](../part3-load-lifecycle/06-compaction.md)。
 
 **怎么用这张树？** 决策树不是让你按图索骥地"照抄一遍"，而是强制你在动手前先回答"这属于哪一类症状"——这一步的价值在于**挡住冲动**。故障现场最常见的错误就是跳过归类、凭直觉扑向自己最熟的那个子系统。先落到四类之一、先动第一件工具拿到主键，你就不会在第一分钟走错方向。
 
@@ -214,8 +222,8 @@ flowchart TD
 |---|---|---|
 | **上来就翻 BE 日志** | 放着 `fe.audit.log` 这张现成索引不用、去几个 G 的 BE 日志全表扫描。分层原则被跳过，第一步就选了最内层的工具。 | 先看审计日志拿 `queryId`（§1.2），再用它做主键定向 grep BE 日志（§1.6 第 2 步）。现象层 → 内核态，别跳级。 |
 | **不留 `queryId` / 不存现场** | `queryId` 是贯穿审计日志、BE 日志、profile 的唯一键（§1.1）。丢了它，四层信息就串不起来，只能各查各的。profile 尤其是**过期即失**——查询结束后不主动留存就没了。 | 报障第一时间记下 `queryId`；对慢查询立刻拉 profile 存档，别等复现。 |
-| **重启大法毁现场** | 卡住/内存高时直接重启，症状是消失了，但 `SHOW PROC`、profile、内存现场、debug point 状态全被清空——**这次故障再也无法归因，下次照样发生**。 | 重启前先取证：`SHOW PROC '/cluster_health'`、`active_queries`、`be.out` 栈、必要时 heap profile（part6 内存篇会详述）。留下现场再重启。 |
+| **重启大法毁现场** | 卡住/内存高时直接重启，症状是消失了，但 `SHOW PROC`、profile、内存现场、debug point 状态全被清空——**这次故障再也无法归因，下次照样发生**。 | 重启前先取证：`SHOW PROC '/cluster_health'`、`active_queries`、`be.out` 栈、必要时 heap profile（详见[第 6 章](./06-memory.md)）。留下现场再重启。 |
 | **跳过症状归类、直扑熟悉的子系统** | 凭"我猜是 BE 的问题"或"上次也是 compaction"开局，等于拿候选二（按组件）的赌博替代了候选三（按层次）的方法。赌错方向，前十分钟全废。 | 先用 1.5 决策树把症状落到慢/错/挂/涨之一，动第一件工具拿到主键，再让**证据**（而非直觉）指向子系统（§1.5）。 |
 | **verbose/debug point 开了忘了关** | `sys_log_verbose_modules` 长期挂着打爆磁盘、拖慢热路径；debug point 忘关全局拖慢一个 BE（§1.4、§1.6）。排查工具本身变成了新故障源。 | verbose 改配置排查完即回滚；debug point 一律带 `timeout`/`execute` 自失效，用完立即 `remove`。 |
 
-一句话收束本章：**排查不是"我知道很多工具"，而是"我知道此刻先动哪个、用它拿到什么主键、再顺着主键往内核走"。** 五件工具按现象→指标→日志→内核态分层，1.5 的决策树把"症状 → 子系统"这一跳固定下来，后续四章则在每个分支里，把前部三十二张清单的"点"接成完整的排查"线"。下一章从最常见的症状——**慢**——开始。
+一句话收束本章：**排查不是"我知道很多工具"，而是"我知道此刻先动哪个、用它拿到什么主键、再顺着主键往内核走"。** 五件工具按现象→指标→日志→内核态分层，1.5 的决策树把"症状 → 子系统"这一跳固定下来，后续五章则在每个分支里，把前部三十二张清单的"点"接成完整的排查"线"。下一章从最常见的症状——**慢**——开始。

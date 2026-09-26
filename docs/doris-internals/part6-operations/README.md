@@ -6,8 +6,8 @@
 |---|---|---|
 | [第 1 章](01-toolbox.md) | 排查方法论与工具箱 | 五件可观测工具按"数据在哪产生"盘点，配"症状→子系统"决策树与"工具本身怎么用错"的元清单 |
 | [第 2 章](02-query-issues.md) | 查询类故障：慢、爆、超时 | `query_timeout` 只有一个有效秒表、FE/BE 同源；"客户端超时但查询还在跑"是客户端/FE/BE 三处秒表各数各的窗口 |
-| [第 3 章](03-load-issues.md) | 导入类故障：失败、积压、事务卡住 | 没有 `ABORT TRANSACTION` 这样的 SQL，卡住的事务绝不手动 abort；-235 是写入阶段报错而非 publish 卡点，治本在 compaction |
-| [第 4 章](04-replica-and-cache-issues.md) | 副本与均衡（一体）／缓存与计算组（分离） | `ADMIN SET REPLICA STATUS "bad"` 标错唯一的好副本会把 tablet 推进 UNRECOVERABLE——改状态前必先看清各副本版本 |
+| [第 3 章](03-load-issues.md) | 导入类故障：失败、积压与事务卡住 | 没有 `ABORT TRANSACTION` 这样的 SQL，卡住的事务绝不手动 abort；-235 是写入阶段报错而非 publish 卡点，治本在 compaction |
+| [第 4 章](04-replica-and-cache-issues.md) | 副本与均衡故障（一体）／缓存与计算组故障（分离） | `ADMIN SET REPLICA STATUS "bad"` 标错唯一的好副本会把 tablet 推进 UNRECOVERABLE——改状态前必先看清各副本版本 |
 | [第 5 章](05-fe-issues.md) | FE 故障：选主、元数据与恢复 | 默认先保元数据再恢复服务；`-r`（metadata_failure_recovery）有"空目录起假权威""多 FE 并存"两大灾难，动前必冷备 meta_dir |
 | [第 6 章](06-memory.md) | 内存管理：BE 内存模型与 MemTracker | 内存是有归属的树、报错 `type` 是路标；`/mem_tracker` 已下线改用 `/profile`；自保双轨——soft 先收 cache、hard 才 memory_gc 取消 top 查询 |
 

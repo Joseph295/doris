@@ -101,11 +101,11 @@ flowchart TD
 
 命中率掉了、查询变慢、对象存储读放大，[part5 第 6 章](../part5-storage-engine/06-cloud-storage.md) §6.7 给了权威三查，这里点出每查的证据来源（File Cache 端点均沿用 §6.6 核实的 `/api/file_cache`，实现 `be/src/service/http/action/file_cache_action.cpp`）：
 
-1. **查容量**：工作集比 cache 大就在颠簸淘汰。看 bvar `file_cache_total_evict_size`（`be/src/io/cache/block_file_cache.cpp:217`）是否持续增长；`file_cache_path` 声明容量是否顶着物理盘或触发磁盘限制模式（§6.2 易错点）。
+1. **查容量**：工作集比 cache 大就在颠簸淘汰。看 bvar `file_cache_total_evict_size`（`be/src/io/cache/block_file_cache.cpp:218`）是否持续增长；`file_cache_path` 声明容量是否顶着物理盘或触发磁盘限制模式（§6.2 易错点）。
 2. **查 TTL**：是否有表误设 `file_cache_ttl_seconds` 把 TTL 预算（默认占 cache 一半）钉满、挤垮普通队列。用 `GET /api/file_cache?op=list_cache` 看队列分布（§6.6）。
 3. **查淘汰风暴**：后台提前淘汰是否长期贴着水位在刷块（§6.2）。
 
-三查的根治都指向"扩 cache 或让工作集/预热对齐容量"。而**最廉价的第一步定性**在审计日志：一条查询的 `ScanBytesFromLocalStorage` 对 `ScanBytesFromRemote`（[第 1 章](./01-toolbox.md) §1.2）——remote 占比突然变高，就是命中率掉了，不必上 BE 就能定性。
+三查的根治都指向"扩 cache 或让工作集/预热对齐容量"。而**最廉价的第一步定性**在审计日志：一条查询的 `ScanBytesFromLocalStorage` 对 `ScanBytesFromRemoteStorage`（[第 1 章](./01-toolbox.md) §1.2）——remote 占比突然变高，就是命中率掉了，不必上 BE 就能定性。
 
 ### 预热失败/慢
 
@@ -158,7 +158,7 @@ flowchart TD
 
 ## 4.6 排查清单（双模式决策树）
 
-本章的决策树是 [第 1 章](./01-toolbox.md) §1.5 主树在存储层的展开：主树先把症状归到"挂/涨"，本树接手后**第一刀切模式**（因为 4.1 的"两套物理现实"决定了此后所有工具与心态），再分症状。
+本章的决策树是 [第 1 章](./01-toolbox.md) §1.5 主树在存储层的展开：主树在"错/挂/涨"里凡是落到存储层的分支（副本错误、修复不动、cache 占满）都指向本章，本树接手后**第一刀切模式**（因为 4.1 的"两套物理现实"决定了此后所有工具与心态），再分症状。
 
 ```mermaid
 flowchart TD

@@ -74,7 +74,7 @@ Stream Load / Broker Load 报 `too many filtered rows` 时，返回体里的 `Er
 
 积压的共同特征是**链路在走、但堆积在某个瓶颈点，吞吐掉下来**。它对应 §1.5 的"涨"分支。part3 有三个堆积点，各有指纹：
 
-- **写入侧：memtable 全局内存反压。** 指纹是 BE `be.INFO` 里 `reached memtable memory`（`be/src/load/memtable/memtable_memory_limiter.cpp:157`；周期刷新那条在 `:259`）。看到它说明是**全局 memtable 内存水位**在反压——所有并发导入一起变慢、调单张表参数无效。三个下手方向（降总占用 / 加快 flush / 抬水位）与"水位百分比须重启才生效"的坑见 part3 [第 3 章](../part3-load-lifecycle/03-tablet-write-path.md) §3.6。
+- **写入侧：memtable 全局内存反压。** 指纹是 BE `be.INFO` 里 `reached memtable memory`（`be/src/load/memtable/memtable_memory_limiter.cpp:157`）。看到它说明是**全局 memtable 内存水位**在反压——所有并发导入一起变慢、调单张表参数无效。三个下手方向（降总占用 / 加快 flush / 抬水位）与"水位百分比须重启才生效"的坑见 part3 [第 3 章](../part3-load-lifecycle/03-tablet-write-path.md) §3.6。
 - **提交侧：publish 积压深度。** 观测法是 **`积压深度 = committedVersion − visibleVersion`**（`fe/fe-core/src/main/java/org/apache/doris/catalog/Partition.java:245`）：`SHOW PARTITIONS` 盯 `VisibleVersion` 涨不涨，`SHOW PROC '/transactions/<dbId>/running'` 里堆积的 `COMMITTED` 事务个数就是直观积压。卡点定位（`version not continuous` 队头阻塞）见 part3 §4.5，本章 §3.4 会把它当"卡住"再展开。
 - **后台侧：compaction 追不上。** `curl '.../api/compaction_score?top_n=N'` 看 score 最高的 tablet，`.../api/compaction/show?tablet_id=<id>` 看某 tablet 的 rowset 数与 cumulative point。score 高企 = 版本出水口跟不上，是 -235 的前兆（part3 §6.6）。
 
@@ -118,7 +118,7 @@ Routine Load 常驻消费，积压表现为 offset lag 拉大、或作业进入 
 | 卡在哪个态 | 判据 | 卡因清单 | 处置 |
 |---|---|---|---|
 | **PREPARE** | 在 `running` 且无 `CommitTime` | 写入侧没走完：flush 反压 / broker task 慢 / 秒级则是 -235 fast-fail | 转 §3.2/§3.3 查写入侧；作业若可取消用 `CANCEL LOAD` |
-| **COMMITTED** | 在 `running`，有 `CommitTime` 无 `PublishTime` | publish 积压：副本不可达/版本不连续**队头阻塞**（`be.INFO` 搜 `version not continuous`，`be/src/storage/task/engine_publish_version_task.cpp:370`），或 `PublishVersionDaemon`（`fe/fe-core/src/main/java/org/apache/doris/transaction/PublishVersionDaemon.java:60`）积压 | 找**最早卡住**的 tablet/版本解除（修副本/等前序），后面自然疏通；**绝不 abort**（见下） |
+| **COMMITTED** | 在 `running`，有 `CommitTime` 无 `PublishTime` | publish 积压：副本不可达/版本不连续**队头阻塞**（`be.INFO` 搜 `version not continuous`，`be/src/storage/task/engine_publish_version_task.cpp:370`，该串为 MoW 表专有；非 MoW 表的版本空洞走异步 publish，观测以积压深度为准），或 `PublishVersionDaemon`（`fe/fe-core/src/main/java/org/apache/doris/transaction/PublishVersionDaemon.java:60`）积压 | 找**最早卡住**的 tablet/版本解除（修副本/等前序），后面自然疏通；**绝不 abort**（见下） |
 | **分离模式 commit 冲突** | FE 日志 `KV_TXN_CONFLICT ... retryTime` 涨（`fe/fe-core/src/main/java/org/apache/doris/cloud/transaction/CloudGlobalTransactionMgr.java:840`） | 高频提交同一热点分区争 `partition_version_key`；或单批太大报 `TXN_BYTES_TOO_LARGE`（`cloud/src/meta-service/meta_service_txn.cpp:3336`） | 降单分区提交频率、攒批、减少单批涉及的分区/tablet 数（part3 §4.5 症状 C） |
 
 ### 易错点：手动 abort 事务的边界与风险
@@ -167,7 +167,7 @@ Routine Load 常驻消费，积压表现为 offset lag 拉大、或作业进入 
 1. **准备**：一张多副本表（或多 BE 单机集群），确认导入正常、`VisibleVersion` 正常推进。
 2. **制造积压**：停掉一个持有副本的 BE 进程（用停机脚本或直接 kill）。持续对该表导入——因副本不可达/版本不连续，publish 卡住。
 3. **观察深度**：`SHOW PARTITIONS` 看 `VisibleVersion` **不再上涨**；`SHOW PROC '/transactions/<dbId>/running'` 看堆积的 `COMMITTED` 事务个数持续增加——`积压深度 = committedVersion − visibleVersion`（§3.3）在肉眼可见地涨。
-4. **找卡点**：目标 BE 的 `be.INFO` 搜 `version not continuous`（`be/src/storage/task/engine_publish_version_task.cpp:370`），找到最早卡住的版本。
+4. **找卡点**：若为 MoW 表，目标 BE 的 `be.INFO` 搜 `version not continuous`（`be/src/storage/task/engine_publish_version_task.cpp:370`，MoW 专有）；非 MoW 表以第 3 步的积压深度定位最早卡住的版本。
 5. **恢复**：把停掉的 BE 拉起来。publish 重试疏通、副本被修复线补齐，`VisibleVersion` 追上、`running` 里的 `COMMITTED` 清空。
 6. **易错点（本演练的真正目的）**：过程中那些卡在 `COMMITTED` 的事务**数据其实已经提交成功**——绝不能 abort（§3.4，只进不退）。恢复靠**补副本 + publish 重试**，不靠取消。如果这时误判成"导入失败"去重导，只会雪上加霜。
 
@@ -211,4 +211,4 @@ flowchart TD
 
 ---
 
-本章把 part3 六章散落的导入排查清单，按运维真正看到的三种表现——**快失败、积压、卡住**——缝成了一条处置线。它和前两章的关系是：§1.5 决策树把"慢/错/挂/涨"这一跳固定下来，本章把落到"导入"之后的路走细。三条纪律收束：**分诊靠表现形态与链路阶段、不靠报错码字面、更不靠导入方式**（-235 三张面孔、Label 三时机都是反例）；**跨章根因缝成处置卡**——-235 从报错原文到治本动作一页可查，机制全在链接里；**卡在 COMMITTED 不是失败**——只进不退，靠 publish 重试而非 abort，误判会造成二次伤害。下一章转向"挂"这一大类里的另一半——集群与节点级故障。
+本章把 part3 六章散落的导入排查清单，按运维真正看到的三种表现——**快失败、积压、卡住**——缝成了一条处置线。它和前两章的关系是：§1.5 决策树把"慢/错/挂/涨"这一跳固定下来，本章把落到"导入"之后的路走细。三条纪律收束：**分诊靠表现形态与链路阶段、不靠报错码字面、更不靠导入方式**（-235 三张面孔、Label 三时机都是反例）；**跨章根因缝成处置卡**——-235 从报错原文到治本动作一页可查，机制全在链接里；**卡在 COMMITTED 不是失败**——只进不退，靠 publish 重试而非 abort，误判会造成二次伤害。下一章转向存储层——一体模式的副本与均衡、分离模式的缓存与计算组。
