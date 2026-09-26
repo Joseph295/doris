@@ -178,7 +178,7 @@ flowchart TB
 
 ## 6.5 动手实验
 
-环境搭建见 part1 第 5 章，不重复。本实验在单机集群即可完成，核心点验证"compaction 削版本"，易错点主动复现 -235。全程用 BE 的 compaction HTTP 接口做**真实观测**——这些接口注册在 `be/src/service/http_service.cpp`：
+环境搭建见 [part1 第 5 章](../part1-architecture/05-source-map-and-dev-env.md)，不重复。本实验在单机集群即可完成，核心点验证"compaction 削版本"，易错点主动复现 -235。全程用 BE 的 compaction HTTP 接口做**真实观测**——这些接口注册在 `be/src/service/http_service.cpp`：
 
 - `GET /api/compaction/show?tablet_id=<id>`（`be/src/service/http_service.cpp:402`）：看某个 tablet 当前 rowset 列表、版本区间、compaction score、cumulative point。
 - `POST /api/compaction/run?tablet_id=<id>&compact_type=cumulative`（`:407`）：手动触发一次 compaction。

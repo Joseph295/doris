@@ -43,7 +43,7 @@
 `try_reserve_from_other_queue()` 分两级策略：
 
 1. **按冷热借（by time interval）**：`try_reserve_from_other_queue_by_time_interval()`（`:1361`）遍历其他队列，只淘汰那些 `atime + hot_data_interval < cur_time` 的块——即**已经过了热数据窗口的冷块**。热块一律不碰。这一级的候选队列由 `get_other_cache_type_without_ttl()`（`:1298`）给出，**刻意不含 TTL**——也就是说，从别的队列借空间时，默认永远不会去动 TTL 的数据（TTL 的语义见下）。
-2. **按越界量借（by size）**：如果第一级还不够、且 `file_cache_enable_evict_from_other_queue_by_size`（`be/src/common/config.cpp:1216`，默认 `true`，可热改）开着，就走 `try_reserve_from_other_queue_by_size()`（`:1419`）。它的关键约束写在注释里——"we will not drain each of them to the bottom -- i.e., we only evict what they have stolen"：只对那些**当前占用已经超过自己 max_size 的队列**下手（`:1428`~`:1430` 判 `cur_queue_size <= cur_queue_max_size` 就跳过），而且**只回收它们越界偷来的那部分**，不会把一条守规矩的队列抽干。这一级的候选队列由 `get_other_cache_type()`（`:1315`）给出，**这次包含 TTL**——但因为只回收越界部分，而 TTL 默认预算高达 50%、极少越界，所以 TTL 实际上依然被强保护。
+2. **按越界量借（by size）**：如果第一级还不够、且 `file_cache_enable_evict_from_other_queue_by_size`（`be/src/common/config.cpp:1216`，默认 `true`，可热改）开着，就走 `try_reserve_from_other_queue_by_size()`（`:1419`）。它的关键约束写在注释里——"we will not drain each of them to the bottom -- i.e., we only evict what they have stolen"：只对那些**当前占用已经超过自己 max_size 的队列**下手（注释 `:1429`~`:1430`；`cur_queue_size <= cur_queue_max_size` 就跳过，`:1433`），而且**只回收它们越界偷来的那部分**，不会把一条守规矩的队列抽干。这一级的候选队列由 `get_other_cache_type()`（`:1315`）给出，**这次包含 TTL**——但因为只回收越界部分，而 TTL 默认预算高达 50%、极少越界，所以 TTL 实际上依然被强保护。
 
 两级都不够，才回到 `try_reserve_for_lru()` 里淘汰**自己队列**的 LRU 尾部（`find_evict_candidates`）。还有一道自我软限：`try_reserve_from_other_queue()` 里若 `_cur_cache_size + size > _capacity && cur_queue_size + size > cur_queue_max_size`（`:1465`）——即全局满了、而且自己也已经用超预算——就直接放弃向别人借，返回失败。
 
@@ -119,7 +119,7 @@ TTL 队列的语义是**"在过期时间内尽量常驻、不被普通 LRU 挤�
 
 ### 读侧的重试、限流与"请求合并/预取"的诚实边界
 
-读侧的 429/503 退避 part2 §7.3 已经核实过并会在 6.7 复用：`S3FileReader::read_at_impl`（`be/src/io/fs/s3_file_reader.cpp:162`）对 HTTP 429（TOO_MANY_REQUESTS）做指数退避重试，最多 `max_s3_client_retry` 次（`be/src/common/config.cpp:1494`，默认 10），每次等待 `min(s3_read_base_wait_time_ms * 2^retry, s3_read_max_wait_time_ms)`（`be/src/io/fs/s3_file_reader.cpp:175`；base `be/src/common/config.cpp:1495` 默认 100ms、上限 `:1496` 默认 800ms）——即 100/200/400/800/800… 毫秒，累加 `s3_file_reader_too_many_request_counter` bvar。
+读侧的 429/503 退避 part2 §7.3 已经核实过并会在 6.7 复用：`S3FileReader::read_at_impl`（`be/src/io/fs/s3_file_reader.cpp:109`）对 HTTP 429（TOO_MANY_REQUESTS）做指数退避重试，最多 `max_s3_client_retry` 次（`be/src/common/config.cpp:1494`，默认 10），每次等待 `min(s3_read_base_wait_time_ms * 2^retry, s3_read_max_wait_time_ms)`（`be/src/io/fs/s3_file_reader.cpp:175`；base `be/src/common/config.cpp:1495` 默认 100ms、上限 `:1496` 默认 800ms）——即 200/400/800/800… 毫秒（retry 计数先自增再计算，首个等待即 2×base），累加 `s3_file_reader_too_many_request_counter` bvar。
 
 **关于"请求合并"和"预取"，需要一个诚实的边界说明。** 分离模式内部 segment 读走的这条路上，"合并"是真实存在的、但形态和外部表读不同：
 

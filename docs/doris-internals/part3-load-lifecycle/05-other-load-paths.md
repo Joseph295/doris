@@ -129,7 +129,7 @@ Group Commit 由会话变量 `group_commit`（`fe/fe-core/src/main/java/org/apac
 
 ## 5.6 动手实验
 
-环境搭建见 part1 第 5 章，不重复。本实验**不依赖外部组件**（Kafka 那套见文末说明），核心点和易错点都用 Insert Into + Group Commit 复现——它们和 Routine Load 的小事务风暴同根同源，能在单机集群直接看到版本数的变化。
+环境搭建见 [part1 第 5 章](../part1-architecture/05-source-map-and-dev-env.md)，不重复。本实验**不依赖外部组件**（Kafka 那套见文末说明），核心点和易错点都用 Insert Into + Group Commit 复现——它们和 Routine Load 的小事务风暴同根同源，能在单机集群直接看到版本数的变化。
 
 ### 实验一（核心点）：观察 Group Commit 把多次写入攒成一个事务
 

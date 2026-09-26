@@ -100,7 +100,7 @@ flowchart TD
 3. [读路径内核](part5-storage-engine/03-read-path.md)——谓词下推、延迟物化、聚合/去重合并读
 4. [主键模型内核](part5-storage-engine/04-mow-internals.md)——MoW 的 Delete Bitmap 全生命周期
 5. [数据管理](part5-storage-engine/05-data-management.md)——Delete、Schema Change、分区生命周期
-6. [存算分离存储](part5-storage-engine/06-cloud-storage.md)——File Cache 内核、对象存储交互、数据回收
+6. [存算分离存储](part5-storage-engine/06-cloud-storage.md)——File Cache 内核、对象存储交互、回收责任边界
 
 以下部分的章节规划摘自设计文档第 6 节，写作过程中如有增删会回到设计文档同步更新。
 

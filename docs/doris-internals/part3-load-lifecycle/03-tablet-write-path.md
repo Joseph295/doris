@@ -89,13 +89,13 @@ flowchart TD
 
 本部分第 2、3 章只在对应小节交代双模式差异即可，主战场（事务提交点、Publish vs MetaService）在第 1、4、6 章。本章的差异集中在两处：rowset 落哪里、delete bitmap 怎么算。
 
-**CloudDeltaWriter 与 DeltaWriter 的差异。** 存算分离模式用 `CloudDeltaWriter`（`class CloudDeltaWriter final : public BaseDeltaWriter`，`be/src/cloud/cloud_delta_writer.h:30`），和本地版共享 `BaseDeltaWriter` 的 memtable/flush 主干——攒 memtable、触发 flush、写 Segment 这套逻辑是复用的。分野在收口：本地 `DeltaWriter::build_rowset` 把 rowset 元数据写进 BE 本地的 tablet meta；`CloudDeltaWriter` 的 Segment 写到**共享对象存储**，rowset 元数据不落本地，而是经 `commit_rowset`（`be/src/cloud/cloud_delta_writer.cpp:112`）调 `_engine.meta_mgr().commit_rowset(...)` 提交给 **MetaService**（`be/src/cloud/cloud_meta_mgr.cpp`）。换句话说，存算分离下 BE 只是个无状态的计算+写盘节点，"这个 tablet 现在有哪些 rowset"这个事实由 MetaService 统一持有。空 rowset（没写到数据）也要显式 `_commit_empty_rowset`（`be/src/cloud/cloud_delta_writer.cpp:127`）向 MetaService 报备，不能像本地那样啥都不做——因为在共享存储模型里，MetaService 需要一份完整、无缺口的 rowset 账本来做版本连续性校验，"这个 tablet 这个事务没产出数据"也是必须记录在案的一条事实，缺了它后续版本推进会对不上号。至于 memtable/flush 这套内存攒批逻辑本身，在 cloud 模式下和本地是同一份代码，区别只在 `RowsetWriter` 背后的 `file_writer` 指向的是远端对象存储而非本地盘；写完的 Segment 后续被查询读取时，走的是 BE 本地的 File Cache（part1 第 3 章 3.5 已述），本地盘退化成一层缓存而非数据的家。这就是为什么存算分离下"导入把本地盘写满"这类本地模式的经典故障基本消失，取而代之的新变量是对象存储的写入延迟与带宽。
+**CloudDeltaWriter 与 DeltaWriter 的差异。** 存算分离模式用 `CloudDeltaWriter`（`class CloudDeltaWriter final : public BaseDeltaWriter`，`be/src/cloud/cloud_delta_writer.h:30`），和本地版共享 `BaseDeltaWriter` 的 memtable/flush 主干——攒 memtable、触发 flush、写 Segment 这套逻辑是复用的。分野在收口：本地 `DeltaWriter::build_rowset` 把 rowset 元数据写进 BE 本地的 tablet meta；`CloudDeltaWriter` 的 Segment 写到**共享对象存储**，rowset 元数据不落本地，而是经 `commit_rowset`（`be/src/cloud/cloud_delta_writer.cpp:112`）调 `_engine.meta_mgr().commit_rowset(...)` 提交给 **MetaService**（`be/src/cloud/cloud_meta_mgr.cpp`）。换句话说，存算分离下 BE 只是个无状态的计算+写盘节点，"这个 tablet 现在有哪些 rowset"这个事实由 MetaService 统一持有。空 rowset（没写到数据）也要显式 `_commit_empty_rowset`（`be/src/cloud/cloud_delta_writer.cpp:127`）向 MetaService 报备，不能像本地那样啥都不做——因为在共享存储模型里，MetaService 需要一份完整、无缺口的 rowset 账本来做版本连续性校验，"这个 tablet 这个事务没产出数据"也是必须记录在案的一条事实，缺了它后续版本推进会对不上号。至于 memtable/flush 这套内存攒批逻辑本身，在 cloud 模式下和本地是同一份代码，区别只在 `RowsetWriter` 背后的 `file_writer` 指向的是远端对象存储而非本地盘；写完的 Segment 后续被查询读取时，走的是 BE 本地的 File Cache（[part1 第 3 章](../part1-architecture/03-data-model.md) 3.5 已述），本地盘退化成一层缓存而非数据的家。这就是为什么存算分离下"导入把本地盘写满"这类本地模式的经典故障基本消失，取而代之的新变量是对象存储的写入延迟与带宽。
 
 **delete bitmap 在分离模式的存放与锁。** 本地模式的 bitmap 计算发生在写入它的那台 BE 上、存本地——因为 tablet 就固定在那台 BE。但存算分离下，一个 tablet 可能被任意计算节点服务，"谁来算 bitmap、算完存哪"必须集中协调，否则两个计算节点各算各的会打架。于是 cloud 模式把 bitmap 的定算挪到了**提交阶段、由 FE 用分布式锁协调**：`CloudGlobalTransactionMgr`（`fe/fe-core/src/main/java/org/apache/doris/cloud/transaction/CloudGlobalTransactionMgr.java`）在 commit 时，先向 MetaService **申请 delete bitmap 更新锁**——`getDeleteBitmapUpdateLock`（`fe/fe-core/src/main/java/org/apache/doris/cloud/transaction/CloudGlobalTransactionMgr.java:1147`），锁的上下文封装在 `DeleteBitmapUpdateLockContext`（`fe/fe-core/src/main/java/org/apache/doris/cloud/transaction/DeleteBitmapUpdateLockContext.java`，构造于 `fe/fe-core/src/main/java/org/apache/doris/cloud/transaction/CloudGlobalTransactionMgr.java:443`）；拿到锁后 `sendCalcDeleteBitmaptask`（`:696`）把计算任务下发给 BE 执行（BE 侧入口 `be/src/cloud/cloud_engine_calc_delete_bitmap_task.cpp:363`，最终仍走 `CloudTablet::update_delete_bitmap`），算完把 bitmap 经 MetaService 持久化（`be/src/cloud/cloud_meta_mgr.cpp:1956` 的 `update_delete_bitmap`），最后 `removeDeleteBitmapUpdateLock`（`:459`）释放锁。**这把 MetaService 锁是 cloud 模式主键表并发提交的串行点**：并发写同一 MoW 表的多个事务，在 commit 时要排队抢这把锁——3.3 讲的"并发导入让 bitmap 计算相互等待"，在 cloud 模式下就具体化成"抢 delete bitmap update lock"。理解不到这一层，会把 cloud 主键表高并发导入的排队现象误判成网络或 MetaService 本身慢。
 
 ## 3.5 动手实验
 
-环境准备见 part1 第 5 章，此处不重复。本节两个实验，一个验证核心点（memtable 攒批→flush→segment），一个主动踩 tricky 点（并发导入把 memtable 内存打到 limiter 水位、观察反压）。
+环境准备见 [part1 第 5 章](../part1-architecture/05-source-map-and-dev-env.md)，此处不重复。本节两个实验，一个验证核心点（memtable 攒批→flush→segment），一个主动踩 tricky 点（并发导入把 memtable 内存打到 limiter 水位、观察反压）。
 
 ### 实验一（核心点）：小 `write_buffer_size` 下观察 flush 与 segment 生成
 
@@ -108,7 +108,7 @@ flowchart TD
    （改成 1MB。这是实验用的极端值，别用于生产。）
 2. 建一张 Duplicate 表，导入一份稍大的 CSV（几十 MB，保证远超 1MB 阈值），用 Stream Load 灌进去（命令见第 2 章实验一）。
 3. **看日志**：在协调 BE 与目标 BE 的 `be.INFO` 里，搜 flush 相关记录——`MemTableWriter` 侧的 flush 提交、以及 rowset 收口日志。会看到一次导入产生了**多次** memtable flush（因为阈值被调到 1MB）。
-4. **在盘上找 Segment**：按 part1 第 3 章 3.3 的目录规则 `{storage_root}/data/{shard_id}/{tablet_id}/{schema_hash}/{rowset_id}_{seg_id}.dat`，用 `SHOW TABLETS FROM <table>` 拿到 tablet_id，然后：
+4. **在盘上找 Segment**：按 [part1 第 3 章](../part1-architecture/03-data-model.md) 3.3 的目录规则 `{storage_root}/data/{shard_id}/{tablet_id}/{schema_hash}/{rowset_id}_{seg_id}.dat`，用 `SHOW TABLETS FROM <table>` 拿到 tablet_id，然后：
    ```bash
    find <storage_root_path>/data -type d -name "<tablet_id>"
    ls -l <找到的 tablet 目录>/*/     # 会看到 {rowset_id}_0.dat、_1.dat ... 多个 segment

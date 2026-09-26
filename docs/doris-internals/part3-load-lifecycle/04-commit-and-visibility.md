@@ -75,7 +75,7 @@ sequenceDiagram
 
 **一个常被误挂在 publish 头上的锅：`-235` / `TOO_MANY_VERSION` 其实发生在写入阶段，不在 publish。** 直觉上容易以为"tablet 版本太多导致 publish 时 add rowset 失败"，但核对代码会发现 publish 路径**根本没有版本数检查**：`-235`（[part1 第 3 章](../part1-architecture/03-data-model.md) 排查清单已验证 `-235` = `TOO_MANY_VERSION`）只在 `RowsetBuilder::check_tablet_version_count`（`be/src/storage/rowset_builder.cpp:182`）里抛，而它由 `RowsetBuilder::init`（`be/src/storage/rowset_builder.cpp:212`，第 222 行调用）触发——那是第 3 章的**写入/prepare 阶段，发生在 commit 之前**。撞 `-235` 的导入在写入时就 fast-fail 了，根本走不到 `COMMITTED`，更谈不上卡 publish。它和成因二其实是**版本堆积**这同一个根因的两副面孔：publish 侧表现为队头阻塞（成因二里"前序事务卡住"堆积版本），写入侧表现为**后续导入在 prepare 阶段直接报 `-235`**。两者根因都是 compaction 追不上导入，缓解都得让 compaction 跟上（详见本部分后续 compaction 章）；但排查入口不同——`-235` 要在写入报错里找，别去翻 publish 日志。
 
-**错写会怎样？** 假如 publish 图省事，允许"跳过缺口版本、直接把后面的版本接上"——版本链就断了一段，查询按连续版本区间取数时会**读到缺一截的数据**（第 1 部分 3.3 讲过版本区间语义）。所以宁可让后面的事务全部排队等，也绝不能跳版本 publish。另一个常见误判：看到事务卡在 `COMMITTED`，就想"abort 掉重来"——但 `COMMITTED` 是不可回滚的终定态，正确动作是**让 publish 重试直到 `VISIBLE`**（或排查并解除卡点，如修副本、等前序 publish），而不是 abort。
+**错写会怎样？** 假如 publish 图省事，允许"跳过缺口版本、直接把后面的版本接上"——版本链就断了一段，查询按连续版本区间取数时会**读到缺一截的数据**（[part1 第 3 章](../part1-architecture/03-data-model.md) 3.3 讲过版本区间语义）。所以宁可让后面的事务全部排队等，也绝不能跳版本 publish。另一个常见误判：看到事务卡在 `COMMITTED`，就想"abort 掉重来"——但 `COMMITTED` 是不可回滚的终定态，正确动作是**让 publish 重试直到 `VISIBLE`**（或排查并解除卡点，如修副本、等前序 publish），而不是 abort。
 
 ### 易错点：`visibleVersion` 与 `nextVersion` 的差值就是积压深度
 
@@ -147,7 +147,7 @@ FDB 是**乐观并发控制**：一个事务提交时，如果它读过的 key �
 
 ## 4.4 动手实验
 
-环境说明沿用 part1 第 5 章，不重复。本节两个实验分别验证核心点（抓 `COMMITTED → VISIBLE` 窗口）和主动踩易错点（quorum 提交成功但副本落后）。
+环境说明沿用 [part1 第 5 章](../part1-architecture/05-source-map-and-dev-env.md)，不重复。本节两个实验分别验证核心点（抓 `COMMITTED → VISIBLE` 窗口）和主动踩易错点（quorum 提交成功但副本落后）。
 
 ### 实验一（核心点）：循环查事务状态，抓 COMMITTED→VISIBLE 窗口
 

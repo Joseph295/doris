@@ -131,7 +131,7 @@ fragment 跑完、`max_filter_ratio` 也过关后，`_on_finish`（`be/src/servi
 
 Stream Load 的**接入方式与计划结构在两种模式下完全一致**：都是 FE 轻量重定向、协调 BE 收流、`scan(pipe) → OlapTableSink` 的迷你 fragment。差异集中在两处，且都不改变主链路的形状。
 
-**其一，分发目标 BE 的选择跟随计算组。** 存算一体下，行被分到某 tablet 后，`VNodeChannel` 发往的是这个 tablet 的**物理副本所在 BE**——BE 既算又存，数据就近落到持有该 tablet 的节点。存算分离下 tablet 没有固定的物理副本绑定，计算节点从共享存储读写，分发目标 BE 由**当前计算组**决定：FE 重定向阶段就用 `StreamLoadHandler.selectBackend`（`fe/fe-core/src/main/java/org/apache/doris/load/StreamLoadHandler.java:97`）在指定计算组里挑协调 BE（对比存算一体的 `selectLocalRedirectBackend` 轮询），后续 sink 分发也落在这个计算组的节点上。这跟 part2 第 5 章 5.4 节讲的 `CloudReplica` 映射是同一套逻辑——**tablet 到"哪台 BE 服务它"的映射，在分离模式下是计算组维度的动态映射，而非固定副本**。导入侧只是这个映射的又一个使用者。
+**其一，分发目标 BE 的选择跟随计算组。** 存算一体下，行被分到某 tablet 后，`VNodeChannel` 发往的是这个 tablet 的**物理副本所在 BE**——BE 既算又存，数据就近落到持有该 tablet 的节点。存算分离下 tablet 没有固定的物理副本绑定，计算节点从共享存储读写，分发目标 BE 由**当前计算组**决定：FE 重定向阶段就用 `StreamLoadHandler.selectBackend`（`fe/fe-core/src/main/java/org/apache/doris/load/StreamLoadHandler.java:97`）在指定计算组里挑协调 BE（对比存算一体的 `selectLocalRedirectBackend` 轮询），后续 sink 分发也落在这个计算组的节点上。这跟 [part2 第 5 章](../part2-query-lifecycle/05-plan-distribution.md) 5.4 节讲的 `CloudReplica` 映射是同一套逻辑——**tablet 到"哪台 BE 服务它"的映射，在分离模式下是计算组维度的动态映射，而非固定副本**。导入侧只是这个映射的又一个使用者。
 
 **其二，事务提交的落点不同——云侧用 `CloudStreamLoadExecutor` 改写了 commit。** 协调 BE 用的 executor 在分离模式下是 `CloudStreamLoadExecutor`（`be/src/cloud/cloud_stream_load_executor.h:23`），它 `final : public StreamLoadExecutor`，`override` 了四个方法：`pre_commit_txn`（`be/src/cloud/cloud_stream_load_executor.h:31`）、`operate_txn_2pc`（`:33`）、`commit_txn`（`:35`）、`rollback_txn`（`:37`）——**接入和执行完全复用父类，只有事务收尾这几步被改写**。
 
@@ -141,7 +141,7 @@ Stream Load 的**接入方式与计划结构在两种模式下完全一致**：�
 
 ## 2.5 动手实验
 
-前置环境（编译、单机拉起、日志级别）一律沿用 part1 第 5 章，不再重复。本实验**一个核心 + 两个踩坑**，全部对着 2.2 的时序图做。
+前置环境（编译、单机拉起、日志级别）一律沿用 [part1 第 5 章](../part1-architecture/05-source-map-and-dev-env.md)，不再重复。本实验**一个核心 + 两个踩坑**，全部对着 2.2 的时序图做。
 
 ### 实验一（核心）：发一次 Stream Load，把日志对上时序图
 

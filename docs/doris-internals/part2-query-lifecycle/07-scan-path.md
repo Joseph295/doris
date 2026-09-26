@@ -83,11 +83,11 @@ flowchart TB
     WAIT --> RET
 ```
 
-**易错点：`get_or_set_downloader` 抢下载权是防重复下载的关键。** 高并发下同一个 EMPTY block 可能被多个 scanner 同时读到，如果每个都去 S3 下一遍、都往同一个 cache 文件写，就是重复流量 + 写冲突。`get_or_set_downloader()` 用 CAS 保证只有一个线程成为该 block 的 downloader、其余线程看到 `DOWNLOADING` 去等（`WaitOtherDownloaderTimer` 记这段等待）。理解这点才能读懂 profile 里"明明是 miss 却没产生对应的 S3 流量"——那是别的线程在下、本线程在等。
+**易错点：`get_or_set_downloader` 抢下载权是防重复下载的关键。** 高并发下同一个 EMPTY block 可能被多个 scanner 同时读到，如果每个都去 S3 下一遍、都往同一个 cache 文件写，就是重复流量 + 写冲突。`get_or_set_downloader()` 在块级 mutex 下认领 downloader（记录 `_downloader_id`），保证只有一个线程成为该 block 的 downloader、其余线程看到 `DOWNLOADING` 去等（内核细节见 [part5 第 6 章](../part5-storage-engine/06-cloud-storage.md) 6.2；`WaitOtherDownloaderTimer` 记这段等待）。理解这点才能读懂 profile 里"明明是 miss 却没产生对应的 S3 流量"——那是别的线程在下、本线程在等。
 
 ### 缓存的分类与淘汰：四条 LRU 队列 + TTL
 
-第二个必须建立的概念：File Cache 内部**不是一条 LRU，而是按用途分成四类、四条独立的 LRU 队列**。类型枚举 `FileCacheType`（`be/src/io/cache/file_cache_common.h:39`）有四个值：`DISPOSABLE=0`、`NORMAL=1`、`INDEX=2`、`TTL=3`；`BlockFileCache`（`be/src/io/cache/block_file_cache.h:166`）里对应四条队列 `_disposable_queue`、`_normal_queue`、`_index_queue`、`_ttl_queue`（`be/src/io/cache/block_file_cache.h:553`~`:556`）。默认容量按比例切分（`be/src/io/cache/file_cache_common.h:32`~`:35`）：`NORMAL` 40%、`TTL` 50%、`INDEX` 5%、`DISPOSABLE` 5%。**为什么要分类？** 因为不同数据的复用价值不同：`INDEX`（索引，如 zone map、前缀索引）几乎每次查询都要读、复用率极高，单独划一块地盘防止被大扫描的数据块挤掉；`DISPOSABLE`（一次性数据，如某些 compaction 中间产物）读完基本不再用，给它很小一块、快速淘汰；`TTL` 是带过期时间的数据（如按时间分区的冷热数据下沉场景），到期由 `block_file_cache_ttl_mgr`（`be/src/io/cache/block_file_cache_ttl_mgr.h`）管理淘汰；`NORMAL` 是普通数据块的大头。四条队列各自 LRU、互不挤占，避免"一次大扫描把索引缓存冲光、之后所有查询都要重读索引"这种灾难。
+第二个必须建立的概念：File Cache 内部**不是一条 LRU，而是按用途分成四类、四条独立的 LRU 队列**。类型枚举 `FileCacheType`（`be/src/io/cache/file_cache_common.h:39`）有四个值：`DISPOSABLE=0`、`NORMAL=1`、`INDEX=2`、`TTL=3`；`BlockFileCache`（`be/src/io/cache/block_file_cache.h:166`）里对应四条队列 `_disposable_queue`、`_normal_queue`、`_index_queue`、`_ttl_queue`（`be/src/io/cache/block_file_cache.h:553`~`:556`）。默认容量按比例切分（`be/src/io/cache/file_cache_common.h:32`~`:35`）：`NORMAL` 40%、`TTL` 50%、`INDEX` 5%、`DISPOSABLE` 5%。**为什么要分类？** 因为不同数据的复用价值不同：`INDEX`（索引，如 zone map、前缀索引）几乎每次查询都要读、复用率极高，单独划一块地盘防止被大扫描的数据块挤掉；`DISPOSABLE`（一次性数据，如某些 compaction 中间产物）读完基本不再用，给它很小一块、快速淘汰；`TTL` 是带过期时间的数据（如按时间分区的冷热数据下沉场景），到期由 `block_file_cache_ttl_mgr`（`be/src/io/cache/block_file_cache_ttl_mgr.h`）管理淘汰；`NORMAL` 是普通数据块的大头。四条队列各自 LRU、各有独立预算（实际是可弹性借还的软预算——空闲互借、紧张时按复用价值回收，见 [part5 第 6 章](../part5-storage-engine/06-cloud-storage.md) 6.2），避免"一次大扫描把索引缓存冲光、之后所有查询都要重读索引"这种灾难。
 
 ### 易错点：file_cache_path 容量 vs 磁盘实际，以及淘汰抖动
 

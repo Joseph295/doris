@@ -74,7 +74,7 @@ FE 侧 `SchemaChangeHandler`（`fe/fe-core/src/main/java/org/apache/doris/alter/
 
 2. **`runWaitingTxnJob`（`:484`）**：等所有**事务 id 小于 watershedTxnId 的导入**全部结束（`checkFailedPreviousLoadAndAbort`，`:487`）。等齐后，向 BE 下发 `AlterReplicaTask`（`:580`），让 BE 把历史数据（截止到分区的 `visibleVersion`，`:526`）转换成新 schema 写进影子副本。状态转入 `RUNNING`。
 
-3. **`runRunningJob`（`:680` 起）**：轮询影子副本是否已追齐 `visibleVersion`——`replica` 的 `checkVersionCatchUp()`（`:706`）。追齐后原子地把影子索引切换成正式索引，job 完成。
+3. **`runRunningJob`（`:616`）**：轮询影子副本是否已追齐 `visibleVersion`——`replica` 的 `checkVersionCatchUp()`（`:706`）。追齐后原子地把影子索引切换成正式索引，job 完成。
 
 用一张时间轴看清 watershed 怎么把"历史"和"增量"缝在一起：
 

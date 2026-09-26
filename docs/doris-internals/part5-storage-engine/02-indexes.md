@@ -61,7 +61,7 @@ flowchart TB
 
 1. 候选列是**排序键列**（sort key columns，MoW 有 cluster key 时用 cluster key，否则用 key 列）；
 2. 最多取 `Math.min(排序键列数, FeConstants.shortkey_max_column_count)` 列——`shortkey_max_column_count = 3`（`fe/fe-core/src/main/java/org/apache/doris/common/FeConstants.java:34`）；
-3. 逐列累加 `getOlapColumnIndexSize()`，一旦累计字节数 `> shortkey_maxsize_bytes`——即 **36 字节**（`fe/fe-core/src/main/java/org/apache/doris/common/FeConstants.java:35`）——就停（`:5606`）；
+3. 逐列累加 `getOlapColumnIndexSize()`，一旦累计字节数 `> shortkey_maxsize_bytes`——即 **36 字节**（`fe/fe-core/src/main/java/org/apache/doris/common/FeConstants.java:35`）——就停（`:5606`）——但若越界发生在 CHAR 族列上，该边界列本身仍计入 short key（`:5607`-`:5610` 的 `isCharFamily()` 分支）；
 4. 特殊约束：VARCHAR 只能作为 short key 的**最后一列**（`:5615`-`:5617`，命中即 `++` 后 break），因为变长列会截断，放中间会让后续列无法参与前缀比较；不能作为 short key 的类型（如 float/double，`couldBeShortKey()` 判定，`:5612`）直接终止。
 
 所以"前 3 列 / 36 字节"是一个**取小**的组合规则：最多 3 列，且累计不超过 36 字节，且遇 VARCHAR 收尾、遇不可比类型截止。**错记成"固定就是前 3 列"会怎样？** 如果第一列就是个 `VARCHAR(100)`，它一列就超 36 字节且是变长列，short key 实际只覆盖它（截断到边界），后面的 key 列根本进不了前缀索引——你以为按前 3 个 key 列点查会走索引，实际只有第一列的前缀在起作用。建模时把宽 VARCHAR 放在排序键最前面，等于亲手废掉了前缀索引对后续列的定位能力。

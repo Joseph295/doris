@@ -102,7 +102,7 @@ Label 幂等依赖 FE 内存里那张 `labelToTxnIds` 表。但这张表不能�
 
 ## 1.4 双模式对比（本章重点段）
 
-part1 第 4 章 4.4 节已经确认过一个关键事实：`GlobalTransactionMgr` 和 `CloudGlobalTransactionMgr`（`fe/fe-core/src/main/java/org/apache/doris/cloud/transaction/CloudGlobalTransactionMgr.java`）是同一个接口 `GlobalTransactionMgrIface` 的两个兄弟实现，FE 按部署形态选其一；云侧的提交最终经 `MetaServiceProxy.commitTxn` 落到 MetaService。本节不重复那个"类对子"事实，而是深入**这个选择在语义上的后果**——事务状态存在哪、FE 重启后从哪恢复、2PC 的预提交与提交在两种模式下分别落在哪个组件。
+[part1 第 4 章](../part1-architecture/04-two-architectures.md) 4.4 节已经确认过一个关键事实：`GlobalTransactionMgr` 和 `CloudGlobalTransactionMgr`（`fe/fe-core/src/main/java/org/apache/doris/cloud/transaction/CloudGlobalTransactionMgr.java`）是同一个接口 `GlobalTransactionMgrIface` 的两个兄弟实现，FE 按部署形态选其一；云侧的提交最终经 `MetaServiceProxy.commitTxn` 落到 MetaService。本节不重复那个"类对子"事实，而是深入**这个选择在语义上的后果**——事务状态存在哪、FE 重启后从哪恢复、2PC 的预提交与提交在两种模式下分别落在哪个组件。
 
 **事务状态住在哪里，是两种模式最根本的分野。**
 
@@ -122,7 +122,7 @@ part1 第 4 章 4.4 节已经确认过一个关键事实：`GlobalTransactionMgr
 
 ## 1.5 动手实验
 
-前置环境（编译集群、单机拉起、日志级别调整）一律沿用 part1 第 5 章，不再重复。本实验**一个核心 + 一个踩坑**。
+前置环境（编译集群、单机拉起、日志级别调整）一律沿用 [part1 第 5 章](../part1-architecture/05-source-map-and-dev-env.md)，不再重复。本实验**一个核心 + 一个踩坑**。
 
 先确认观测命令真实存在。事务状态可以从两个入口看：一是 `SHOW PROC '/transactions'` 系列，其目录树由 `ProcService`（`fe/fe-core/src/main/java/org/apache/doris/common/proc/ProcService.java:48` 注册了 `transactions` 根）逐层展开——根节点 `TransDbProcDir`（`fe/fe-core/src/main/java/org/apache/doris/common/proc/TransDbProcDir.java:27`）列出各库的 `RunningTransactionNum`，下钻到某个 dbId 是 `TransStateProcDir`（`fe/fe-core/src/main/java/org/apache/doris/common/proc/TransStateProcDir.java:27`，只有 `running` / `finished` 两个子节点），再下钻是 `TransProcDir`（`fe/fe-core/src/main/java/org/apache/doris/common/proc/TransProcDir.java:29`），列出每个事务的 `TransactionId / Label / TransactionStatus / PrepareTime / PreCommitTime / CommitTime / PublishTime / FinishTime` 等字段。二是 `SHOW TRANSACTION`（由 `ShowTransactionCommand`，`fe/fe-core/src/main/java/org/apache/doris/nereids/trees/plans/commands/ShowTransactionCommand.java` 实现），支持 `WHERE label = '...'` 或 `WHERE id = ...` 精确查一个事务。
 
