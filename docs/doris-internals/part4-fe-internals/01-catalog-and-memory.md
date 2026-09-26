@@ -37,7 +37,7 @@ private transient ConcurrentHashMap<String, Database> fullNameToDb = new Concurr
 
 还有一个值得留意的细节：这两张索引都标了 `transient`（`:207`-`208`）。也就是说持久化时并不直接序列化这两张 map——image 里存的是库对象本身，索引是加载后在内存里重建的派生结构。这与 1.2 后面要讲的 TabletInvertedIndex "不入 image、重启重建"是同一种设计哲学：**能从权威数据推导出来的索引，就不进持久化，只当内存加速结构**。连 `information_schema`、`mysql` 这两个内建的 MySQL 兼容库也是在 `InternalCatalog` 初始化时直接 `put` 进两张索引的（`:219`-`222`，`InfoSchemaDb`/`MysqlDb`），而不走建库的持久化路径。
 
-**第二处：TabletInvertedIndex 倒排，为什么单独建。** 沿对象树从上往下是"正向"路径：库→表→分区→物化索引→tablet→副本。但 FE 有大量场景要**反着查**：BE 每次心跳上报一批 tablet 的状态，FE 要立刻知道每个 tablet 属于哪张表哪个分区、它的副本都在哪些 BE 上、该不该同步版本或触发修复；副本调度器要按 tablet 找副本。如果只有正向树，给一个裸 tabletId 反查归属，就得遍历所有库所有表——O(全集群)，完全不可行。所以 FE 单独维护一张倒排：抽象基类 `TabletInvertedIndex`（`fe/fe-core/src/main/java/org/apache/doris/catalog/TabletInvertedIndex.java:52`）持有 `tabletMetaMap`（`:63`，`Long2ObjectOpenHashMap<TabletMeta>`），把 tabletId 直接映射到它的 `TabletMeta`（`fe/fe-core/src/main/java/org/apache/doris/catalog/TabletMeta.java:25`，内含 table/partition/index id）。存算一体的实现 `LocalTabletInvertedIndex`（`fe/fe-core/src/main/java/org/apache/doris/catalog/LocalTabletInvertedIndex.java:68`）再叠一张 `replicaMetaTable`（`:72`，`HashBasedTable<Long, Long, Replica>`，即 tabletId × backendId → Replica），以及一张按 backendId 主键的反向表 `backingReplicaMetaTable`（`:76`），让"某 BE 上有哪些副本"也能 O(1) 拿到。
+**第二处：TabletInvertedIndex 倒排，为什么单独建。** 沿对象树从上往下是"正向"路径：库→表→分区→物化索引→tablet→副本。但 FE 有大量场景要**反着查**：BE 每次心跳上报一批 tablet 的状态，FE 要立刻知道每个 tablet 属于哪张表哪个分区、它的副本都在哪些 BE 上、该不该同步版本或触发修复；副本调度器要按 tablet 找副本。如果只有正向树，给一个裸 tabletId 反查归属，就得遍历所有库所有表——O(全集群)，完全不可行。所以 FE 单独维护一张倒排：抽象基类 `TabletInvertedIndex`（`fe/fe-core/src/main/java/org/apache/doris/catalog/TabletInvertedIndex.java:52`）持有 `tabletMetaMap`（`:63`，`Long2ObjectOpenHashMap<TabletMeta>`），把 tabletId 直接映射到它的 `TabletMeta`（`fe/fe-core/src/main/java/org/apache/doris/catalog/TabletMeta.java:25`，内含 table/partition/index id）。存算一体的实现 `LocalTabletInvertedIndex`（`fe/fe-core/src/main/java/org/apache/doris/catalog/LocalTabletInvertedIndex.java:68`）再叠一张 `replicaMetaTable`（`:72`，`Table<Long, Long, Replica>`（HashBasedTable 实现），即 tabletId × backendId → Replica），以及一张按 backendId 主键的反向表 `backingReplicaMetaTable`（`:76`），让"某 BE 上有哪些副本"也能 O(1) 拿到。
 
 这张倒排最典型的消费者就是 **BE 心跳上报**：每个 BE 周期性把自己盘上所有 tablet 的状态汇报上来，FE 侧的 `tabletReport` 拿着一批裸 tabletId，要逐个判断"这个 tablet 在元数据里还存不存在、副本版本对不对、要不要同步或删除"。有了倒排，这一步是对每个 tabletId 做 O(1) 的 map 查找；没有倒排，就得对每次上报做一遍全树扫描，心跳频率下根本扛不住。所以倒排不是锦上添花，而是"BE 状态汇报"这条高频路径能成立的前提。
 
@@ -68,7 +68,7 @@ flowchart TB
 
 **tricky 点：内存元数据的"权威时刻"——只有 Master 的内存是权威的。** part1 第 2 章已证：`Env.isMaster()` 就一句 `feType == FrontendNodeType.MASTER`，且**只有 Master 能写 editLog**。这句话在内存视角下有个直接推论：**任一时刻，只有 Master 进程内存里的元数据是权威版本**。Follower 和 Observer 的内存不是自己算出来的，而是靠一个后台 `replayer` 线程不断回放 Master 产生的 editlog"追"上来的（回放循环见 `fe/fe-core/src/main/java/org/apache/doris/catalog/Env.java:3146` 起）。回放有延迟，于是存在一个**stale-read 窗口**：Master 上刚建好一张表、editlog 刚写下，但某个 Observer 还没回放到那一条，此刻在这个 Observer 上查这张表就是"查不到"。Doris 给这个窗口设了上限 `meta_delay_toleration_second`（`fe/fe-common/src/main/java/org/apache/doris/common/Config.java:243`，默认 300 秒）：非 Master 一旦发现自己落后 Master 超过这个阈值，就把 `canRead` 置 false、**主动停止对外读服务**，宁可不服务也不返回太旧的元数据。**错写会怎样**：如果运维脚本或应用误以为"连上任意一个 FE 读到的都是最新的",在负载均衡后面对着 Observer 建表后立刻查询，就会间歇性地"建表成功但查不到"——根因不是 bug，而是没理解权威只在 Master、非 Master 有回放窗口。想读到强一致的最新元数据，要么连 Master，要么容忍这个窗口。
 
-**易错点：tablet 元数据放大在 FE 内存的真实占用，以及 checkpoint 的翻倍峰值。** part1 第 3 章 3.2 tricky 点二给过那个会出事的乘积：**单表 tablet 总数 = 分区数 × 分桶数 × 副本数 ×（1 + rollup 个数）**，一张按天两年、64 分桶、3 副本、1 rollup 的表就能到 28 万 tablet，而集群有成百上千张表。回到本章的内存视角，把这笔账落到具体对象上：每个 tablet 在 FE 内存里至少对应正向树上的一个 `Tablet` 对象、每个副本一个 `Replica` 对象，外加倒排里 `tabletMetaMap` 的一条 `TabletMeta` 和 `replicaMetaTable` 里每副本一格。tablet 数线性放大，这几类对象就线性放大，直接顶高 FE 的 JVM 堆。**更隐蔽的是 checkpoint 时的翻倍峰值**：把内存元数据快照成 image，需要在内存里完整地序列化一份，这一刻内存里近似同时存在"运行态的元数据"和"正在被写出的那一份"，峰值内存接近翻倍——这也是 part1 3.2 里"checkpoint 变慢""Full GC 频繁"那几个症状的内存侧根因。checkpoint 具体怎么做、翻倍峰值如何被 checkpoint 独立线程/独立进程手段规避，是**第 2 章**的正题，本章只在这里埋下这颗种子，第 2 章会讲 checkpoint 翻倍并把这半边账补完。
+**易错点：tablet 元数据放大在 FE 内存的真实占用，以及 checkpoint 的翻倍峰值。** part1 第 3 章 3.2 tricky 点二给过那个会出事的乘积：**单表 tablet 总数 = 分区数 × 分桶数 × 副本数 ×（1 + rollup 个数）**，一张按天两年、64 分桶、3 副本、1 rollup 的表就能到 28 万 tablet，而集群有成百上千张表。回到本章的内存视角，把这笔账落到具体对象上：每个 tablet 在 FE 内存里至少对应正向树上的一个 `Tablet` 对象、每个副本一个 `Replica` 对象，外加倒排里 `tabletMetaMap` 的一条 `TabletMeta` 和 `replicaMetaTable` 里每副本一格。tablet 数线性放大，这几类对象就线性放大，直接顶高 FE 的 JVM 堆。**更隐蔽的是 checkpoint 时的翻倍峰值**：把内存元数据快照成 image，需要在内存里完整地序列化一份，这一刻内存里近似同时存在"运行态的元数据"和"正在被写出的那一份"，峰值内存接近翻倍——这也是 part1 3.2 里"checkpoint 变慢""Full GC 频繁"那几个症状的内存侧根因。checkpoint 具体怎么做、这个翻倍峰值能否靠独立线程/独立进程之类的手段规避，是**第 2 章**的正题，本章只在这里埋下这颗种子，第 2 章会讲 checkpoint 翻倍并把这半边账补完。
 
 ## 1.3 源码走读：锁模型
 
@@ -114,7 +114,7 @@ flowchart TB
 
 1. 记录基线：`SHOW PROC '/statistic'` 看 `Total` 行的 `TabletNum`/`ReplicaNum`；`curl` 一次 `/metrics` 抓 `jvm_heap_size_bytes{type="used"}`。
 2. 建一张 1000 分区、每分区 4 分桶、3 副本的表（存算一体默认 3 副本），灌少量数据让分区落地。
-3. 再次看 `/statistic` 与堆内存：`TabletNum` 增量应约等于 1000 × 4 =4000，`ReplicaNum` 约 12000；堆 `used` 相应上抬。用 `jmap -histo` 确认 `Replica` 实例数增量与 `ReplicaNum` 量级吻合——这就把"一个 tablet/副本 = FE 堆里一组常驻对象"从抽象变成了可数的数字。
+3. 再次看 `/statistic` 与堆内存：`TabletNum` 增量应约等于 1000 × 4 = 4000，`ReplicaNum` 约 12000；堆 `used` 相应上抬。用 `jmap -histo` 确认 `Replica` 实例数增量与 `ReplicaNum` 量级吻合——这就把"一个 tablet/副本 = FE 堆里一组常驻对象"从抽象变成了可数的数字。
 
 **易错点步骤（主动踩放大效应）：**
 

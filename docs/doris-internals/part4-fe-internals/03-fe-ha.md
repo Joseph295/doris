@@ -85,7 +85,7 @@ stateDiagram-v2
 - `replica_sync_policy`（`:254`，默认 **`SYNC`**）：Follower 复制到日志时的落盘强度。
 - `replica_ack_policy`（`:259`，默认 **`SIMPLE_MAJORITY`**）：一条日志要多少个副本 ack 才算写成功（第 2 章已述）。
 
-前两个的取值 `SYNC` / `WRITE_NO_SYNC` / `NO_SYNC` 由 `getSyncPolicy`（`:552`）翻译成 bdbje 的 `Durability.SyncPolicy`，语义差别正落在**掉电**上：`SYNC` 是"写入并 **fsync 落到物理磁盘**才返回"——机器**突然掉电也不丢**这条日志；`WRITE_NO_SYNC` 是"写到 OS 文件系统缓存就返回、不 fsync"——**进程崩溃能扛住**（数据已交给 OS），但**掉电会丢**尚未刷盘的那部分；`NO_SYNC` 连 OS 缓存都不保证，最快也最不安全。默认选 `SYNC`，就是把元数据的持久性摆在吞吐之前——宁可每条日志多一次 fsync，也不容忍掉电丢元数据。`fe/fe-common/src/main/java/org/apache/doris/common/Config.java:245`-`248` 的注释给了唯一的松绑场景：只有当 Follower 足够多（≥3）、多数派本身已提供跨机冗余时，才**可以**把 sync policy 调成 `WRITE_NO_SYNC` 换吞吐——因为此时一台机器掉电丢的那点未刷盘日志，还能从其它多数派副本补回来。**错写会怎样**：在只有 1~2 个 Follower 的小集群里贸然设成 `WRITE_NO_SYNC` 图快，一旦 Master 所在机器掉电，最近若干条已"提交成功"的元数据可能凭空消失，而客户端早已收到成功回执——这是最难排查的一类"元数据回退"事故。
+前两个的取值 `SYNC` / `WRITE_NO_SYNC` / `NO_SYNC` 由 `getSyncPolicy`（`:552`）翻译成 bdbje 的 `Durability.SyncPolicy`，语义差别正落在**掉电**上：`SYNC` 是"写入并 **fsync 落到物理磁盘**才返回"——机器**突然掉电也不丢**这条日志；`WRITE_NO_SYNC` 是"写到 OS 文件系统缓存就返回、不 fsync"——**进程崩溃能扛住**（数据已交给 OS），但**掉电会丢**尚未刷盘的那部分；`NO_SYNC` 连 OS 缓存都不保证，最快也最不安全。默认选 `SYNC`，就是把元数据的持久性摆在吞吐之前——宁可每条日志多一次 fsync，也不容忍掉电丢元数据。`fe/fe-common/src/main/java/org/apache/doris/common/Config.java:245`-`248` 的注释给了唯一的松绑场景：只有当 Follower 多于 3 个（即 4 台及以上）、多数派本身已提供跨机冗余时，才**可以**把 sync policy 调成 `WRITE_NO_SYNC` 换吞吐——因为此时一台机器掉电丢的那点未刷盘日志，还能从其它多数派副本补回来。**错写会怎样**：在只有 1~2 个 Follower 的小集群里贸然设成 `WRITE_NO_SYNC` 图快，一旦 Master 所在机器掉电，最近若干条已"提交成功"的元数据可能凭空消失，而客户端早已收到成功回执——这是最难排查的一类"元数据回退"事故。
 
 ## 3.3 源码走读：请求转发与读写路径
 

@@ -55,7 +55,7 @@ FDB 是个扁平的有序 KV,没有"表""行"的概念。Doris 全部元数据�
 | `storage_vault` | `storage_vault ... "vault" ${resource_id}` | `StorageVaultPB` | `storage_vault_key` (`:347`) |
 | `copy` | `copy ... "job" ${stage_id} ${table_id} ${copy_id} ${group_id}` | `CopyJobPB` | `copy_job_key` (`:441`) |
 
-这张表把分离模式的元数据全景摊开了:**tablet 的元数据(`meta "tablet"`)、它的每个 rowset(`meta "rowset"`)、它的统计(`stats "tablet"`)、它所属分区的版本(`version "partition"`)、正在跑的 compaction job(`job "tablet"`)、被删待回收的 rowset(`recycle "rowset"`)——原来在 FE 内存对象树上的这些字段,如今都是 FDB 里一条条独立的 key。**注意 key 里刻意冗余了层级 id**:`meta_tablet_key` 把 `table_id/index_id/partition_id/tablet_id` 全编进去(`cloud/src/meta-store/keys.cpp:308`),`stats_tablet_key` 也是同一组(`cloud/src/meta-store/keys.cpp:406` 附近),这不是浪费——它让"扫一张表下所有 tablet""扫一个分区下所有 stats"变成一次前缀范围扫描,这正是下面要讲的有序编码的用武之地。
+这张表把分离模式的元数据全景摊开了:**tablet 的元数据(`meta "tablet"`)、它的每个 rowset(`meta "rowset"`)、它的统计(`stats "tablet"`)、它所属分区的版本(`version "partition"`)、正在跑的 compaction job(`job "tablet"`)、被删待回收的 rowset(`recycle "rowset"`)——原来在 FE 内存对象树上的这些字段,如今都是 FDB 里一条条独立的 key。**注意 key 里刻意冗余了层级 id**:`meta_tablet_key` 把 `table_id/index_id/partition_id/tablet_id` 全编进去(`cloud/src/meta-store/keys.cpp:308`),`stats_tablet_key` 也是同一组(`cloud/src/meta-store/keys.h:406`，实现在 `cloud/src/meta-store/keys.cpp:418`),这不是浪费——它让"扫一张表下所有 tablet""扫一个分区下所有 stats"变成一次前缀范围扫描,这正是下面要讲的有序编码的用武之地。
 
 ### 编码方案:为什么必须是"有序"的
 
