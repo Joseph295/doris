@@ -103,7 +103,7 @@ flowchart TB
 -            row_sources.size() * sizeof(UInt16)) {
 +        // Use capacity() - size() to get the truly available element slots.
 +        // Note: PODArrayBase::allocated_bytes() includes pad_left and pad_right,
-+        // which are NOT usable for storing elements. ...（省略注释中间两行）...
++        // which are NOT usable for storing elements. ...（省略注释后续三行余）...
 +        size_t available_slots = _buffer.capacity() - _buffer.size();
 +        if (available_slots < row_sources.size()) {
              VLOG_NOTICE << "RowSourceBuffer is too large, serialize and reset buffer: "

@@ -62,7 +62,7 @@ MoW 表上的 `UPDATE` 会被规划成**部分列更新**（partial update，模
 
 ### 源码对照
 
-`git show 6122098eb0` 的核心 hunk（历史态 `6122098eb0:be/src/olap/memtable.cpp`，构造函数部分）：
+`git show 6122098eb0` 的核心 hunk（历史态 `6122098eb0:be/src/olap/memtable.cpp`，构造函数部分）：（该 hunk 内另有一处与本案例无关的 `// TODO: Support ZOrderComparator` 注释位置迁移，未展示）
 
 ```cpp
      _vec_row_comparator = std::make_shared<RowInBlockComparator>(_tablet_schema);

@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 完成第七部分（案例集）全部 5 章（10 个真实案例）及部分目录页，并将系列 README 的第七部分状态翻转为"已完成"——全系列收官。
+**Goal:** 完成第七部分（案例集）全部 5 章（10 个真实案例）及部分目录页，并将系列 README 的第七部分状态翻转为"已完成"——全系列收官。（实际交付 12 个：ch4/ch5 各扩为 3 案例）
 
 **Architecture:** 纯文档写作项目。案例素材已由挖掘阶段产出并核实（`.superpowers/sdd/part7-case-candidates.md`，23 个候选，全部 sha 经 `git show --stat` 验证）。本部分每章 2 个真实案例，按设计文档第 6 节的案例结构写作：**问题背景→根因分析→修复思路→源码对照→经验教训**；每案例必须与前六部分的机制章节互链（"这个 bug 撞的正是 partX chY 讲过的那面墙"）。案例的源码对照用 `git show <sha>` 的关键 hunk 片段（≤40 行/段），修复前后对照讲解。每任务流程："读候选档案+git show 核实 → 写作 → 校验 → 提交"。
 
