@@ -51,7 +51,7 @@ flowchart TD
 | 第二部分：一条查询 SQL 的一生 | 从 MySQL 协议接入到 Profile 精读，走完一次查询的完整执行路径 | 已完成 |
 | 第三部分：一次导入的一生 | 从事务模型到 Compaction，走完一次写入的完整生命周期 | 已完成 |
 | 第四部分：元数据与 FE 内核 | Catalog 体系、持久化、高可用与存算分离元数据服务的内部机制 | 已完成 |
-| 第五部分：存储引擎深潜 | Rowset/Segment 文件格式、索引体系、读路径与主键模型内核 | 规划中 |
+| 第五部分：存储引擎深潜 | Rowset/Segment 文件格式、索引体系、读路径与主键模型内核 | 已完成 |
 | 第六部分：集群运维与故障排查 | 从症状到根因的系统化故障定位方法论 | 规划中 |
 | 第七部分：经典 feature/bug 案例集 | 从 git 历史精选真实案例做源码级复盘 | 规划中 |
 
@@ -93,16 +93,16 @@ flowchart TD
 5. [调度体系：Tablet 均衡、副本修复与计算组管理](part4-fe-internals/05-scheduling.md)——存算一体副本修复+搬迁均衡 vs 存算分离 tablet 映射再均衡+cache 预热
 6. [外部数据源：Catalog 联邦查询架构概览](part4-fe-internals/06-external-catalog.md)——统一 Catalog 抽象+按源实现、SPI 连接器插件、多层元数据缓存与失效
 
+### 第五部分：存储引擎深潜（已完成）
+
+1. [Rowset 与 Segment 文件格式](part5-storage-engine/01-segment-format.md)——编码、压缩、页结构与 Footer 布局
+2. [索引体系：四把裁剪的刀](part5-storage-engine/02-indexes.md)——前缀索引、ZoneMap、BloomFilter、倒排索引
+3. [读路径内核](part5-storage-engine/03-read-path.md)——谓词下推、延迟物化、聚合/去重合并读
+4. [主键模型内核](part5-storage-engine/04-mow-internals.md)——MoW 的 Delete Bitmap 全生命周期
+5. [数据管理](part5-storage-engine/05-data-management.md)——Delete、Schema Change、分区生命周期
+6. [存算分离存储](part5-storage-engine/06-cloud-storage.md)——File Cache 内核、对象存储交互、数据回收
+
 以下部分的章节规划摘自设计文档第 6 节，写作过程中如有增删会回到设计文档同步更新。
-
-### 第五部分：存储引擎深潜（规划中）
-
-1. Rowset 与 Segment 文件格式：编码、压缩、页结构
-2. 索引体系：前缀索引、ZoneMap、BloomFilter、倒排索引
-3. 读路径内核：谓词下推、延迟物化、聚合/去重读逻辑
-4. 主键模型内核：MoW 的 Delete Bitmap 全生命周期
-5. 数据管理：Delete、Schema Change、分区生命周期
-6. 存算分离存储：File Cache 内核、对象存储交互、数据回收
 
 ### 第六部分：集群运维与故障排查（规划中）
 
