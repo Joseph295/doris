@@ -50,7 +50,7 @@ flowchart TD
 | 第一部分：全局架构与设计哲学 | 建立 FE / BE / MetaService 的职责边界与存算一体、存算分离两种形态的全局心智模型 | 已完成 |
 | 第二部分：一条查询 SQL 的一生 | 从 MySQL 协议接入到 Profile 精读，走完一次查询的完整执行路径 | 已完成 |
 | 第三部分：一次导入的一生 | 从事务模型到 Compaction，走完一次写入的完整生命周期 | 已完成 |
-| 第四部分：元数据与 FE 内核 | Catalog 体系、持久化、高可用与存算分离元数据服务的内部机制 | 规划中 |
+| 第四部分：元数据与 FE 内核 | Catalog 体系、持久化、高可用与存算分离元数据服务的内部机制 | 已完成 |
 | 第五部分：存储引擎深潜 | Rowset/Segment 文件格式、索引体系、读路径与主键模型内核 | 规划中 |
 | 第六部分：集群运维与故障排查 | 从症状到根因的系统化故障定位方法论 | 规划中 |
 | 第七部分：经典 feature/bug 案例集 | 从 git 历史精选真实案例做源码级复盘 | 规划中 |
@@ -84,16 +84,16 @@ flowchart TD
 5. [其他导入方式](part3-load-lifecycle/05-other-load-paths.md)——Broker/Routine/Insert Into/Group Commit 的路径差异
 6. [Compaction](part3-load-lifecycle/06-compaction.md)——为什么需要、调度策略、两种模式下的执行位置
 
+### 第四部分：元数据与 FE 内核（已完成）
+
+1. [Catalog 体系与元数据内存结构](part4-fe-internals/01-catalog-and-memory.md)——JVM 堆内对象树、双索引与 tablet 倒排、三层读写锁模型
+2. [元数据持久化：EditLog、bdbje 与 Checkpoint](part4-fe-internals/02-editlog-and-checkpoint.md)——一次 DDL 的日志之旅、bdbje 多数派复制、同进程影子 Env 成像
+3. [FE 高可用：选主、角色与故障切换](part4-fe-internals/03-fe-ha.md)——bdbje 选主、Master/Follower/Observer 三角色、切主与请求转发
+4. [存算分离元数据：MetaService、FDB 布局与 Recycler](part4-fe-internals/04-metaservice-fdb.md)——FDB key 空间布局、单事务 5s/10MB 硬限、Recycler 异步回收与节点管理
+5. [调度体系：Tablet 均衡、副本修复与计算组管理](part4-fe-internals/05-scheduling.md)——存算一体副本修复+搬迁均衡 vs 存算分离 tablet 映射再均衡+cache 预热
+6. [外部数据源：Catalog 联邦查询架构概览](part4-fe-internals/06-external-catalog.md)——统一 Catalog 抽象+按源实现、SPI 连接器插件、多层元数据缓存与失效
+
 以下部分的章节规划摘自设计文档第 6 节，写作过程中如有增删会回到设计文档同步更新。
-
-### 第四部分：元数据与 FE 内核（规划中）
-
-1. Catalog 体系与元数据内存结构
-2. 元数据持久化：EditLog、bdbje、Checkpoint（存算一体）
-3. FE 高可用：选主、角色（Master/Follower/Observer）、故障切换
-4. 存算分离元数据：MetaService 架构、FoundationDB 数据布局、Recycler
-5. 调度体系：Tablet 均衡、副本修复（存算一体）与集群/计算组管理（存算分离）
-6. 外部数据源：Catalog 联邦查询架构概览
 
 ### 第五部分：存储引擎深潜（规划中）
 
