@@ -105,7 +105,7 @@ sequenceDiagram
 
 ### 源码对照
 
-`git show fbcca5ecc6` 的核心 hunk（历史态 `fbcca5ecc6:be/src/olap/rowset/beta_rowset_writer.cpp`，diff 极小，全文引用无省略）：
+`git show fbcca5ecc6` 的核心 hunk（历史态 `fbcca5ecc6:be/src/olap/rowset/beta_rowset_writer.cpp`，diff 极小，改动行全文引用无省略；两处 `@@` 行的原始行号头以所在函数上下文标注代替）：
 
 ```cpp
 @@ BaseBetaRowsetWriter::~BaseBetaRowsetWriter() {
@@ -185,7 +185,7 @@ sequenceDiagram
 
 ### 源码对照
 
-`git show 00bdff9381` 只改一个文件、加 10 删 1（当前态与历史态同为 `be/src/cloud/cloud_rowset_writer.cpp`，全文引用无省略）：
+`git show 00bdff9381` 只改一个文件、加 10 删 1（当前态与历史态同为 `be/src/cloud/cloud_rowset_writer.cpp`，改动行全文引用无省略，`@@` 头与前后未改动的上下文行略）：
 
 ```cpp
 -CloudRowsetWriter::~CloudRowsetWriter() = default;
@@ -221,7 +221,7 @@ C18 与 C19 是同一机制上的一对姊妹 bug，把它们并排看，比单�
 
 一句话把这对姊妹钉死：**"析构前必须 join 异步任务"只是必要条件；当任务会做虚调用、且派生类改写了该虚函数时，还多一条充分条件——join 必须早到 vtable 尚未切换的那一刻。** C18 修的是前者、C19 补的是后者，缺任何一半，cloud MoW 写入路径都会在 load 取消时出事。
 
-还有一个值得记住的时间线细节：C18 与 C19 之间隔了将近一个月，作者也不同。C18 把取消收口到基类、并在 message 里明确写了"consistent with `BetaRowsetWriter`'s destructor behavior"——它自认为已经把这个 UAF 类别治干净了。但它治的样本里**没有带 vtable override 的派生类**：`BetaRowsetWriter`（本地）不 override `_build_rowset_meta`，所以"基类析构才 join"对它毫无副作用，测试也全绿。`CloudRowsetWriter` 才是那个 override 了虚函数的反例，而它的问题要等到真实 cloud 环境里出现"load 取消 + 任务在飞"的交错才暴露。**这就是并发修复最容易翻车的地方：一个修复在它见过的所有派生类上都正确，不等于它在这个类族的抽象层面正确**——只要存在一个改写了关键虚函数的派生类，"基类兜底"的假设就破了。C18→C19 不是 C18 修错了，而是 C18 的正确性**没有覆盖到整个继承体系**。
+还有一个值得记住的时间线细节：C18 与 C19 之间隔了将近一个月，作者也不同。C18 把取消收口到基类，从它的 message（只字未提任何派生类差异、把问题定性为"potential use after free"并附一份 gdb 栈）看，**它把这当成了一个已经治干净的 UAF 类别**——这一句是笔者据其修复形态与 message 语气所作的推断，C18 的 message 里并没有"已覆盖全部派生类"之类的断言（那句 "consistent with `BetaRowsetWriter`'s destructor behavior" 属于 C19 的 message，见前文，不要张冠李戴）。但 C18 治的样本里**没有带 vtable override 的派生类**：`BetaRowsetWriter`（本地）不 override `_build_rowset_meta`，所以"基类析构才 join"对它毫无副作用，测试也全绿。`CloudRowsetWriter` 才是那个 override 了虚函数的反例，而它的问题要等到真实 cloud 环境里出现"load 取消 + 任务在飞"的交错才暴露。**这就是并发修复最容易翻车的地方：一个修复在它见过的所有派生类上都正确，不等于它在这个类族的抽象层面正确**——只要存在一个改写了关键虚函数的派生类，"基类兜底"的假设就破了。C18→C19 不是 C18 修错了，而是 C18 的正确性**没有覆盖到整个继承体系**。
 
 ---
 
